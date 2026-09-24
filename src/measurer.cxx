@@ -105,11 +105,9 @@ void Measurer::computeEnergy(G_node ***fld) {
   DM &da = model->domain;
   const auto &data = model->data;
   const auto &coeff = data.acoefficients;
-  // Same effective field as IdealPV2::step_no_reject
-  PetscReal H[4] = {coeff.H, 0., 0., 0.};
-  if (data.ahandler.superfluidmode) {
-    H[0] *= coeff.sigmabyf(data.atime.t());
-  }
+  // Same effective field H * sigma/f as IdealPV2::step_no_reject
+  const PetscReal H[4] = {coeff.H * coeff.sigmabyf(data.atime.t()), 0., 0.,
+                          0.};
 
   PetscInt ixs, iys, izs, nx, ny, nz;
   DMDAGetCorners(da, &ixs, &iys, &izs, &nx, &ny, &nz);

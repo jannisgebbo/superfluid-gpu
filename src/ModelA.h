@@ -124,8 +124,6 @@ struct ModelAHandlerData {
   int nevents = 1;
   int current_event = 0;
 
-  bool superfluidmode = false;
-
   void read(nlohmann::json &params) {
     evolverType = params.value("evolverType", evolverType);
     seed = params.value("seed", seed);
@@ -135,8 +133,6 @@ struct ModelAHandlerData {
 
     eventmode = params.value("eventmode", eventmode);
     nevents = params.value("nevents", nevents);
-
-    superfluidmode = params.value("superfluidmode", superfluidmode);
   }
 
   void print() {
@@ -150,9 +146,6 @@ struct ModelAHandlerData {
     PetscPrintf(PETSC_COMM_WORLD, "eventmode = %s\n",
                 (eventmode ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "nevents = %d\n", nevents);
-
-    PetscPrintf(PETSC_COMM_WORLD, "superfluidmode = %s\n",
-                (superfluidmode ? "true" : "false"));
   }
 };
 
@@ -402,7 +395,7 @@ public:
           PetscReal x = i * hx;
           if (!func) {
             for (L = 0; L < ModelAData::Ndof; L++) {
-              if (ahandler.superfluidmode and L == 0) {
+              if (L == 0) {
                 u[k][j][i][L] = sqrt(data.acoefficients.f2(data.atime.t()));
               } else {
                 u[k][j][i][L] = 0.;

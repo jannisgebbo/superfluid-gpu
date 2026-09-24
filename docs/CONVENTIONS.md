@@ -18,7 +18,7 @@ tree is exploratory / tests.
 | `chi` (χ) | **5.0** | Chosen with f² so `v² = f²/χ = 1`, making the ideal-step CFL bound reduce to `dt < a`. |
 | `evolverType` | `"SuperSplitStep"` | Only stepper in this build. |
 | `SuperSplitStep.step_sequence` | `"ABBBBBB"` | 1 ideal + 6 diffusion substeps per outer `dt` (effective diffusion dt = dt/6). |
-| `superfluidmode` | `true` | `grunner.checkinputs()` asserts this. |
+| `superfluidmode` | *(removed)* | The code is always in superfluid mode. The key is ignored if present. SuperQuench still needs it set to `true`. |
 | `eventmode` | `true` | Runs are ensembles; typically `nevents = 2`. |
 
 Implicit relation the reference runs also use (hardcoded in `squench.py`,

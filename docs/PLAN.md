@@ -76,8 +76,9 @@ Seed state: `SuperQuench@c137ab88`. The two repos are allowed to diverge.
 
 ## Superfluid-mode pathway (what we kept)
 
-Runtime selection: `superfluidmode = true` and
-`evolverType = "SuperSplitStep"`; `grunner.checkinputs()` asserts both.
+The code is always in superfluid mode; the `superfluidmode` flag and its
+branches were removed. `evolverType = "SuperSplitStep"` is the only stepper;
+`grunner.checkinputs()` asserts it.
 
 Nothing in the stepping path calls `NoiseGenerator`; the trajectory is
 deterministic given the initial conditions.

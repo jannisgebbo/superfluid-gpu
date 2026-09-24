@@ -48,10 +48,9 @@ bool IdealPV2::step_no_reject(const double &dt) {
   PetscCall(DMDAVecGetArray(da, model->solution, &phinew));
 
   const auto &coeff = data.acoefficients;
-  PetscReal H[4] = {coeff.H, 0., 0., 0.};
-  if (data.ahandler.superfluidmode) {
-    H[0] *= coeff.sigmabyf(data.atime.t());
-  }
+  // Superfluid mode: the field couples as H * sigma/f
+  const PetscReal H[4] = {coeff.H * coeff.sigmabyf(data.atime.t()), 0., 0.,
+                          0.};
   const PetscReal axx = pow(1. / data.hX(), 2);
   const PetscReal ayy = pow(1. / data.hY(), 2);
   const PetscReal azz = pow(1. / data.hZ(), 2);
@@ -196,8 +195,7 @@ ModelGExplicitDiffusionStep::ModelGExplicitDiffusionStep(ModelA &in)
 // host loop bit-for-bit.
 static PetscErrorCode diffusion_stencil_kokkos(
     DM da, Vec localU, Vec solution, const PetscReal (&Hin)[4], PetscReal axx,
-    PetscReal ayy, PetscReal azz, PetscReal dtG, PetscReal dtD, PetscReal f,
-    bool superfluidmode) {
+    PetscReal ayy, PetscReal azz, PetscReal dtG, PetscReal dtD, PetscReal f) {
   PetscFunctionBeginUser;
   PetscInt xs, ys, zs, xm, ym, zm;
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
@@ -225,20 +223,18 @@ static PetscErrorCode diffusion_stencil_kokkos(
                          2. * (axx + ayy + azz) * phi(k, j, i, l));
           p[l] += dtG * H[l];
         }
-        if (superfluidmode) {
-          // Same as G_node::normalize_phi
-          PetscReal norm = 0.;
+        // Normalize phi to f (same as G_node::normalize_phi)
+        PetscReal norm = 0.;
+        for (PetscInt l = 0; l < Nphi; l++) {
+          norm += p[l] * p[l];
+        }
+        if (norm > tiny) {
+          norm = Kokkos::sqrt(norm);
           for (PetscInt l = 0; l < Nphi; l++) {
-            norm += p[l] * p[l];
+            p[l] *= f / norm;
           }
-          if (norm > tiny) {
-            norm = Kokkos::sqrt(norm);
-            for (PetscInt l = 0; l < Nphi; l++) {
-              p[l] *= f / norm;
-            }
-          } else {
-            p[0] = f;
-          }
+        } else {
+          p[0] = f;
         }
         for (PetscInt l = 0; l < Nphi; l++) {
           phinew(k, j, i, l) = p[l];
@@ -275,10 +271,9 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
   PetscCall(ghost_exchange(da, model->solution, localU));
 
   const auto &coeff = data.acoefficients;
-  PetscReal H[4] = {coeff.H, 0., 0., 0.};
-  if (data.ahandler.superfluidmode) {
-    H[0] *= coeff.sigmabyf(data.atime.t());
-  }
+  // Superfluid mode: the field couples as H * sigma/f
+  const PetscReal H[4] = {coeff.H * coeff.sigmabyf(data.atime.t()), 0., 0.,
+                          0.};
   const PetscReal axx = pow(1. / data.hX(), 2);
   const PetscReal ayy = pow(1. / data.hY(), 2);
   const PetscReal azz = pow(1. / data.hZ(), 2);
@@ -296,8 +291,7 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
 #ifdef SFGPU_KOKKOS
   if (use_kokkos) {
     PetscCall(diffusion_stencil_kokkos(da, localU, model->solution, H, axx,
-                                       ayy, azz, dtG, dtD, f,
-                                       data.ahandler.superfluidmode));
+                                       ayy, azz, dtG, dtD, f));
   } else
 #endif
   {
@@ -333,11 +327,8 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
           // Add the mass term (H[l]  is  H * sigma/f)
           phinew[k][j][i].f[l] += dtG * H[l];
         }
-        if (data.ahandler.superfluidmode) {
-          // In superfluid mode we need to normalize the first four components
-          // of the solution to f2
-          G_node::normalize_phi(phinew[k][j][i].f, f);
-        }
+        // Normalize the first four components of the solution to f
+        G_node::normalize_phi(phinew[k][j][i].f, f);
 
         for (PetscInt l = 0; l < ModelAData::NA; l++) {
           // Compute the nabla^2 A

@@ -41,8 +41,7 @@ data = {
     # For running multi-events
     "eventmode": False,
     "nevents": 1,
-    # parameters for superfluid events
-    "superfluidmode": True,
+    # parameters for superfluid events (the code is always in superfluid mode)
     "f2_constant": 5.0,
 }
 
@@ -57,8 +56,6 @@ def checkinputs():
         return
     if data["chi"] != 5.0:
         raise SystemExit("Chi should be five")
-    if not data["superfluidmode"]:
-        raise SystemExit("This build only supports superfluidmode=True")
     if data["f2_constant"] != 5.0:
         raise SystemExit("f2 constant should be five")
     if data["evolverType"] != "SuperSplitStep":
