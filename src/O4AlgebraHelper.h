@@ -12,38 +12,47 @@
 
 // For the generator and other O4 conventions, see Derek's notes.
 
+// Callable from Kokkos kernels in the GPU build. On the device sqrt/sin/cos
+// are CUDA's, which differ from glibc in the last bit.
+#ifdef SFGPU_KOKKOS
+#include <Kokkos_Core.hpp>
+#define O4_FUNCTION KOKKOS_INLINE_FUNCTION
+#else
+#define O4_FUNCTION inline
+#endif
+
 namespace O4AlgebraHelper {
 
-PetscScalar norm(PetscScalar *v) {
+O4_FUNCTION PetscScalar norm(PetscScalar *v) {
   return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
 
-void add(PetscScalar *a, PetscScalar *b, PetscScalar *c) {
+O4_FUNCTION void add(PetscScalar *a, PetscScalar *b, PetscScalar *c) {
   for (int i = 0; i < 3; ++i) {
     c[i] = a[i] + b[i];
   }
 }
 
-void scalmul(PetscScalar a, PetscScalar *b, PetscScalar *c) {
+O4_FUNCTION void scalmul(PetscScalar a, PetscScalar *b, PetscScalar *c) {
   for (int i = 0; i < 3; ++i) {
     c[i] = a * b[i];
   }
 }
 
 // c+=a*b
-void muladd(PetscScalar a, PetscScalar *b, PetscScalar *c) {
+O4_FUNCTION void muladd(PetscScalar a, PetscScalar *b, PetscScalar *c) {
   for (int i = 0; i < 3; ++i) {
     c[i] += a * b[i];
   }
 }
 
-void cross(PetscScalar *a, PetscScalar *b, PetscScalar *c) {
+O4_FUNCTION void cross(PetscScalar *a, PetscScalar *b, PetscScalar *c) {
   c[0] = a[1] * b[2] - b[1] * a[2];
   c[1] = a[2] * b[0] - a[0] * b[2];
   c[2] = a[0] * b[1] - b[0] * a[1];
 }
 
-PetscScalar dot(PetscScalar *a, PetscScalar *b) {
+O4_FUNCTION PetscScalar dot(PetscScalar *a, PetscScalar *b) {
   PetscScalar res = 0;
   for (int i = 0; i < 3; ++i) {
     res += a[i] * b[i];
@@ -51,7 +60,7 @@ PetscScalar dot(PetscScalar *a, PetscScalar *b) {
   return res;
 }
 
-void quatmul(PetscScalar *v1, PetscScalar *v2, PetscScalar *w) {
+O4_FUNCTION void quatmul(PetscScalar *v1, PetscScalar *v2, PetscScalar *w) {
   w[0] = v1[0] * v2[0] - dot(v1 + 1, v2 + 1);
   cross(v1 + 1, v2 + 1, w + 1);
   muladd(v2[0], v1 + 1, w + 1);
@@ -61,7 +70,7 @@ void quatmul(PetscScalar *v1, PetscScalar *v2, PetscScalar *w) {
   // v2.getV());
 }
 
-void expmul(PetscScalar *v, PetscScalar *w) {
+O4_FUNCTION void expmul(PetscScalar *v, PetscScalar *w) {
   PetscScalar abs = norm(v);
   if(abs > 1e-20){
     w[0] = cos(abs);
@@ -75,7 +84,7 @@ void expmul(PetscScalar *v, PetscScalar *w) {
   }
 }
 
-void O4Rotation(PetscScalar *V, PetscScalar *A,
+O4_FUNCTION void O4Rotation(PetscScalar *V, PetscScalar *A,
                 PetscScalar *phi) // In place O4 rotation specified by a vector
                                   // and axial charge
 {

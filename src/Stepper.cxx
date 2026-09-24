@@ -14,7 +14,144 @@ IdealPV2::IdealPV2(ModelA &in)
   // Store for later use
   DMDAGetCorners(da, &xstart, &ystart, &zstart, &xdimension, &ydimension,
                  &zdimension);
+#ifdef SFGPU_KOKKOS
+  use_kokkos = is_kokkos_vec(model->solution);
+#endif
 }
+
+// Rotates phi at one site by the charges A, V (converted to chemical
+// potentials). Shared by the host loops and the Kokkos kernels.
+O4_FUNCTION void rotate_by_charges(PetscScalar *f, const PetscScalar *A,
+                                   const PetscScalar *V, PetscReal chi,
+                                   PetscReal dt) {
+  PetscScalar axialmu[ModelAData::NA], vectormu[ModelAData::NV];
+
+  for (PetscInt s = 0; s < ModelAData::NV; s++) {
+    vectormu[s] = -V[s] / chi * dt;
+  }
+
+  for (PetscInt s = 0; s < ModelAData::NA; s++) {
+    axialmu[s] = -A[s] / chi * dt;
+  }
+
+  O4AlgebraHelper::O4Rotation(vectormu, axialmu, f);
+}
+
+#ifdef SFGPU_KOKKOS
+// Device version of IdealPV2::step_no_reject: first half-drift, ghost
+// exchange, then the kick fused with the second half-drift. Same arithmetic
+// in the same order as the host loops; only sin/cos differ in the last bit.
+static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
+                                        PetscReal chi, PetscReal H0,
+                                        PetscReal axx, PetscReal ayy,
+                                        PetscReal azz) {
+  const auto &prof = Profiling::get();
+  PetscFunctionBeginUser;
+  PetscInt xs, ys, zs, xm, ym, zm;
+  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+  const SitePolicy owned({zs, ys, xs}, {zs + zm, ys + ym, xs + xm});
+  const PetscReal hdt = dt / 2.0;
+
+  // drifts the solution by dt / 2.0
+  PetscCall(PetscLogEventBegin(prof.ideal_rotate, 0, 0, 0, 0));
+  {
+    NodeView u;
+    PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, solution, &u));
+    Kokkos::parallel_for(
+        "IdealRotate", owned, KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+          PetscScalar f[4], A[3], V[3];
+          for (int c = 0; c < 4; c++) f[c] = u(k, j, i, c);
+          for (int c = 0; c < 3; c++) A[c] = u(k, j, i, 4 + c);
+          for (int c = 0; c < 3; c++) V[c] = u(k, j, i, 7 + c);
+          rotate_by_charges(f, A, V, chi, hdt);
+          for (int c = 0; c < 4; c++) u(k, j, i, c) = f[c];
+        });
+    Kokkos::fence();
+    PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, solution, &u));
+  }
+  PetscCall(PetscLogEventEnd(prof.ideal_rotate, 0, 0, 0, 0));
+
+  // Fill in the ghost cells
+  Vec localU;
+  PetscCall(DMGetLocalVector(da, &localU));
+  PetscCall(ghost_exchange(da, solution, localU));
+
+  PetscCall(PetscLogEventBegin(prof.ideal_kick, 0, 0, 0, 0));
+  {
+    ConstNodeView phi;
+    NodeView phinew;
+    PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, localU, &phi));
+    PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, solution, &phinew));
+    Kokkos::parallel_for(
+        "IdealKick", owned, KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+          // phi components of the site and its six neighbors
+          PetscScalar c[4], xp[4], xm[4], yp[4], ym[4], zp[4], zm[4];
+          for (int l = 0; l < 4; l++) {
+            c[l] = phi(k, j, i, l);
+            xp[l] = phi(k, j, i + 1, l);
+            xm[l] = phi(k, j, i - 1, l);
+            yp[l] = phi(k, j + 1, i, l);
+            ym[l] = phi(k, j - 1, i, l);
+            zp[l] = phi(k + 1, j, i, l);
+            zm[l] = phi(k - 1, j, i, l);
+          }
+          PetscScalar A[3], V[3], f[4];
+          for (int l = 0; l < 3; l++) A[l] = phinew(k, j, i, 4 + l);
+          for (int l = 0; l < 3; l++) V[l] = phinew(k, j, i, 7 + l);
+          for (int l = 0; l < 4; l++) f[l] = phinew(k, j, i, l);
+
+          PetscScalar advxx, advyy, advzz;
+          for (PetscInt l = 0; l < ModelAData::NA; l++) {
+            advxx = (-xp[0] * c[l + 1] + c[0] * xp[l + 1] + c[0] * xm[l + 1] -
+                     xm[0] * c[l + 1]) *
+                    axx;
+            advyy = (-yp[0] * c[l + 1] + c[0] * yp[l + 1] + c[0] * ym[l + 1] -
+                     ym[0] * c[l + 1]) *
+                    ayy;
+            advzz = (-zp[0] * c[l + 1] + c[0] * zp[l + 1] + c[0] * zm[l + 1] -
+                     zm[0] * c[l + 1]) *
+                    azz;
+            A[l] += dt * (advxx + advyy + advzz - H0 * c[l + 1]);
+          }
+
+          PetscInt s1, s2, epsilon;
+          for (PetscInt s = 0; s < ModelAData::NV; s++) {
+            s1 = (s + 1) % 3;
+            s2 = (s + 2) % 3;
+            epsilon = ((PetscScalar)(s - s1) * (s1 - s2) * (s2 - s)) / 2.;
+            advxx = epsilon *
+                    (xp[1 + s2] * c[1 + s1] - c[1 + s2] * xm[1 + s1] -
+                     xp[1 + s1] * c[1 + s2] + c[1 + s1] * xm[1 + s2]) *
+                    axx;
+            advyy = epsilon *
+                    (yp[1 + s2] * c[1 + s1] - c[1 + s2] * ym[1 + s1] -
+                     yp[1 + s1] * c[1 + s2] + c[1 + s1] * ym[1 + s2]) *
+                    ayy;
+            advzz = epsilon *
+                    (zp[1 + s2] * c[1 + s1] - c[1 + s2] * zm[1 + s1] -
+                     zp[1 + s1] * c[1 + s2] + c[1 + s1] * zm[1 + s2]) *
+                    azz;
+            V[s] += dt * (advxx + advyy + advzz);
+          }
+
+          // drifts dt / 2.0 (fused, as in the host loop)
+          rotate_by_charges(f, A, V, chi, hdt);
+
+          for (int l = 0; l < 3; l++) phinew(k, j, i, 4 + l) = A[l];
+          for (int l = 0; l < 3; l++) phinew(k, j, i, 7 + l) = V[l];
+          for (int l = 0; l < 4; l++) phinew(k, j, i, l) = f[l];
+        });
+    Kokkos::fence();
+    PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, solution, &phinew));
+    PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &phi));
+  }
+  PetscCall(PetscLogFlops(Profiling::ideal_kick_flops * xm * ym * zm));
+  PetscCall(PetscLogEventEnd(prof.ideal_kick, 0, 0, 0, 0));
+
+  PetscCall(DMRestoreLocalVector(da, &localU));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+#endif
 
 // Position-Verlet update for the ideal (advective) sector. Linearized about
 // phi_0 = f this is a wave equation with omega^2 = v^2 khat^2 + m^2, where
@@ -26,6 +163,17 @@ bool IdealPV2::step(const double &dt) { return step_no_reject(dt); }
 
 bool IdealPV2::step_no_reject(const double &dt) {
   const auto &prof = Profiling::get();
+
+#ifdef SFGPU_KOKKOS
+  if (use_kokkos) {
+    const auto &coeff = data.acoefficients;
+    PetscCall(ideal_step_kokkos(
+        da, model->solution, dt, coeff.chi,
+        coeff.H * coeff.sigmabyf(data.atime.t()), pow(1. / data.hX(), 2),
+        pow(1. / data.hY(), 2), pow(1. / data.hZ(), 2)));
+    return true;
+  }
+#endif
 
   // drifts the solution by dt / 2.0
   G_node ***phinew;
@@ -157,18 +305,7 @@ void IdealPV2::rotatePhi(G_node ***phinew, double dt) {
 
 // Rotates phi at one site by the charges (converted to chemical potentials)
 void IdealPV2::rotateSite(G_node &node, double dt) const {
-  const auto &coeff = data.acoefficients;
-  PetscScalar axialmu[ModelAData::NA], vectormu[ModelAData::NV];
-
-  for (PetscInt s = 0; s < ModelAData::NV; s++) {
-    vectormu[s] = -node.V[s] / coeff.chi * dt;
-  }
-
-  for (PetscInt s = 0; s < ModelAData::NA; s++) {
-    axialmu[s] = -node.A[s] / coeff.chi * dt;
-  }
-
-  O4AlgebraHelper::O4Rotation(vectormu, axialmu, node.f);
+  rotate_by_charges(node.f, node.A, node.V, data.acoefficients.chi, dt);
 }
 
 void IdealPV2::finalize() { ; }
@@ -207,7 +344,7 @@ static PetscErrorCode diffusion_stencil_kokkos(
 
   const Kokkos::Array<PetscReal, 4> H = {Hin[0], Hin[1], Hin[2], Hin[3]};
   const PetscReal tiny = std::numeric_limits<double>::min();
-  const PetscInt Nphi = ModelAData::Nphi, NA = ModelAData::NA;
+  const PetscInt Nphi = ModelAData::Nphi;
   const PetscInt Nq = ModelAData::NA + ModelAData::NV;
 
   Kokkos::parallel_for(

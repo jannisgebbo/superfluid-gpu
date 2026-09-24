@@ -368,7 +368,6 @@ public:
                                          ModelA *model, void *params) = 0,
                             void *params = 0) {
 
-    const auto &ahandler = data.ahandler;
 
     // Compute the lattice spacing
     PetscReal hx = data.hX();

@@ -200,10 +200,14 @@ main → Run
    bit-identical to the host loop. At NX=32 the stencil is 10× faster, and
    the B-stage uploads drop from 756 to 126 (one per step, after the host A
    step).
-2. **Kokkos port** of the remaining loops: `IdealPV2::step_no_reject` (kick +
-   fused second drift, and the first drift). The rotation uses sin/cos,
-   whose CUDA versions differ from glibc in the last bit, so the A step is
-   validated within a tolerance, not bit-for-bit.
+2. ~~Kokkos port of the A step~~ **done**: `ideal_step_kokkos` (first
+   half-drift kernel, then kick fused with the second half-drift).
+   `O4AlgebraHelper` functions and `rotate_by_charges` are shared by host
+   and device. Against the CPU build (NX=32, 4 ranks, 126 steps) the output
+   agrees to roundoff (≤ 4e-16 absolute, energy 2.5e-16 relative). It is
+   not bit-identical only because CUDA's sin/cos differ from glibc. **The
+   stepping path now has zero host↔device transfers.** At NX=32 the kernels
+   are 10–30× faster and the total is exchange-latency bound.
 3. Move the measurer's slice averages to Kokkos once host copies show up in
    the GPU profile. Measurement cost (6–8% on CPU) is otherwise not a
    concern; measure every 6–10 steps via `saveFrequency` if needed.

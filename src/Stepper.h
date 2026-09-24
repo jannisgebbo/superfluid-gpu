@@ -34,6 +34,9 @@ private:
 
   // Minor optimization
   PetscInt xstart, ystart, zstart, xdimension, ydimension, zdimension;
+
+  // Run the step as Kokkos kernels (solution is a Kokkos vector)
+  bool use_kokkos = false;
 };
 
 /////////////////////////////////////////////////////////////////////////
