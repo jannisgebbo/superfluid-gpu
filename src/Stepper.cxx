@@ -51,6 +51,10 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
   const SitePolicy owned({zs, ys, xs}, {zs + zm, ys + ym, xs + xm});
   const PetscReal hdt = dt / 2.0;
+  constexpr PetscInt Nphi = ModelAData::Nphi, NA = ModelAData::NA,
+                     NV = ModelAData::NV;
+  constexpr PetscInt OffsetA = ModelAData::OffsetA,
+                     OffsetV = ModelAData::OffsetV;
 
   // drifts the solution by dt / 2.0
   PetscCall(PetscLogEventBegin(prof.ideal_rotate, 0, 0, 0, 0));
@@ -59,12 +63,12 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
     PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, solution, &u));
     Kokkos::parallel_for(
         "IdealRotate", owned, KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
-          PetscScalar f[4], A[3], V[3];
-          for (int c = 0; c < 4; c++) f[c] = u(k, j, i, c);
-          for (int c = 0; c < 3; c++) A[c] = u(k, j, i, 4 + c);
-          for (int c = 0; c < 3; c++) V[c] = u(k, j, i, 7 + c);
+          PetscScalar f[Nphi], A[NA], V[NV];
+          for (int c = 0; c < Nphi; c++) f[c] = u(k, j, i, c);
+          for (int c = 0; c < NA; c++) A[c] = u(k, j, i, OffsetA + c);
+          for (int c = 0; c < NV; c++) V[c] = u(k, j, i, OffsetV + c);
           rotate_by_charges(f, A, V, chi, hdt);
-          for (int c = 0; c < 4; c++) u(k, j, i, c) = f[c];
+          for (int c = 0; c < Nphi; c++) u(k, j, i, c) = f[c];
         });
     Kokkos::fence();
     PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, solution, &u));
@@ -85,8 +89,9 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
     Kokkos::parallel_for(
         "IdealKick", owned, KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
           // phi components of the site and its six neighbors
-          PetscScalar c[4], xp[4], xm[4], yp[4], ym[4], zp[4], zm[4];
-          for (int l = 0; l < 4; l++) {
+          PetscScalar c[Nphi], xp[Nphi], xm[Nphi], yp[Nphi], ym[Nphi],
+              zp[Nphi], zm[Nphi];
+          for (int l = 0; l < Nphi; l++) {
             c[l] = phi(k, j, i, l);
             xp[l] = phi(k, j, i + 1, l);
             xm[l] = phi(k, j, i - 1, l);
@@ -95,13 +100,13 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
             zp[l] = phi(k + 1, j, i, l);
             zm[l] = phi(k - 1, j, i, l);
           }
-          PetscScalar A[3], V[3], f[4];
-          for (int l = 0; l < 3; l++) A[l] = phinew(k, j, i, 4 + l);
-          for (int l = 0; l < 3; l++) V[l] = phinew(k, j, i, 7 + l);
-          for (int l = 0; l < 4; l++) f[l] = phinew(k, j, i, l);
+          PetscScalar A[NA], V[NV], f[Nphi];
+          for (int l = 0; l < NA; l++) A[l] = phinew(k, j, i, OffsetA + l);
+          for (int l = 0; l < NV; l++) V[l] = phinew(k, j, i, OffsetV + l);
+          for (int l = 0; l < Nphi; l++) f[l] = phinew(k, j, i, l);
 
           PetscScalar advxx, advyy, advzz;
-          for (PetscInt l = 0; l < ModelAData::NA; l++) {
+          for (PetscInt l = 0; l < NA; l++) {
             advxx = (-xp[0] * c[l + 1] + c[0] * xp[l + 1] + c[0] * xm[l + 1] -
                      xm[0] * c[l + 1]) *
                     axx;
@@ -115,7 +120,7 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
           }
 
           PetscInt s1, s2, epsilon;
-          for (PetscInt s = 0; s < ModelAData::NV; s++) {
+          for (PetscInt s = 0; s < NV; s++) {
             s1 = (s + 1) % 3;
             s2 = (s + 2) % 3;
             epsilon = ((PetscScalar)(s - s1) * (s1 - s2) * (s2 - s)) / 2.;
@@ -137,9 +142,9 @@ static PetscErrorCode ideal_step_kokkos(DM da, Vec solution, PetscReal dt,
           // drifts dt / 2.0 (fused, as in the host loop)
           rotate_by_charges(f, A, V, chi, hdt);
 
-          for (int l = 0; l < 3; l++) phinew(k, j, i, 4 + l) = A[l];
-          for (int l = 0; l < 3; l++) phinew(k, j, i, 7 + l) = V[l];
-          for (int l = 0; l < 4; l++) phinew(k, j, i, l) = f[l];
+          for (int l = 0; l < NA; l++) phinew(k, j, i, OffsetA + l) = A[l];
+          for (int l = 0; l < NV; l++) phinew(k, j, i, OffsetV + l) = V[l];
+          for (int l = 0; l < Nphi; l++) phinew(k, j, i, l) = f[l];
         });
     Kokkos::fence();
     PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, solution, &phinew));
@@ -345,7 +350,6 @@ static PetscErrorCode diffusion_stencil_kokkos(
   const Kokkos::Array<PetscReal, 4> H = {Hin[0], Hin[1], Hin[2], Hin[3]};
   const PetscReal tiny = std::numeric_limits<double>::min();
   const PetscInt Nphi = ModelAData::Nphi;
-  const PetscInt Nq = ModelAData::NA + ModelAData::NV;
 
   Kokkos::parallel_for(
       "DiffusionStencil", SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
@@ -378,7 +382,7 @@ static PetscErrorCode diffusion_stencil_kokkos(
         }
 
         // Charges A (c = 4..6) then V (c = 7..9): nabla^2 with D
-        for (PetscInt c = Nphi; c < Nphi + Nq; c++) {
+        for (PetscInt c = ModelAData::OffsetA; c < ModelAData::Ndof; c++) {
           phinew(k, j, i, c) +=
               dtD * (axx * (phi(k, j, i + 1, c) + phi(k, j, i - 1, c)) +
                      ayy * (phi(k, j + 1, i, c) + phi(k, j - 1, i, c)) +

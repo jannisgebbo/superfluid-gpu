@@ -292,20 +292,21 @@ KOKKOS_INLINE_FUNCTION void add_site_obs(const ConstNodeView &u, PetscInt k,
                                          PetscInt j, PetscInt i,
                                          SliceObs &acc) {
   const int NObs = Measurer::NObs;
-  double phi[4], rho[6];
+  constexpr PetscInt Nphi = ModelAData::Nphi, NA = ModelAData::NA;
+  double phi[Nphi], rho[NA + ModelAData::NV];
   double phi2 = 0.;
-  for (int l = 0; l < 4; l++) {
+  for (int l = 0; l < Nphi; l++) {
     phi[l] = u(k, j, i, l);
     acc.v[l] += phi[l];
     phi2 += phi[l] * phi[l];
   }
-  for (int l = 0; l < 3; l++) {
-    rho[l] = u(k, j, i, 4 + l);     // A
-    rho[l + 3] = u(k, j, i, 7 + l); // V
-    acc.v[4 + l] += rho[l];
-    acc.v[7 + l] += rho[l + 3];
+  for (int l = 0; l < NA; l++) {
+    rho[l] = u(k, j, i, ModelAData::OffsetA + l);      // A
+    rho[l + NA] = u(k, j, i, ModelAData::OffsetV + l); // V
+    acc.v[ModelAData::OffsetA + l] += rho[l];
+    acc.v[ModelAData::OffsetV + l] += rho[l + NA];
   }
-  acc.v[10] += phi2;
+  acc.v[ModelAData::Ndof] += phi2;
 
   // Rotated to the local direction n = phi / sigma
   const double sigma = Kokkos::sqrt(phi2);
@@ -381,7 +382,7 @@ static void energy_terms(const ConstNodeView &u, PetscInt xs, PetscInt ys,
       "Energy", SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
       KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i, PetscScalar & g,
                     PetscScalar & q, PetscScalar & h) {
-        for (int s = 0; s < 4; s++) {
+        for (int s = 0; s < ModelAData::Nphi; s++) {
           const PetscScalar mid = u(k, j, i, s);
           const PetscScalar dz = u(k + 1, j, i, s) - mid;
           const PetscScalar dy = u(k, j + 1, i, s) - mid;
@@ -389,7 +390,7 @@ static void energy_terms(const ConstNodeView &u, PetscInt xs, PetscInt ys,
           g += dz * dz + dy * dy + dx * dx;
         }
         h += u(k, j, i, 0) * H0;
-        for (int c = 4; c < 10; c++) {
+        for (int c = ModelAData::OffsetA; c < ModelAData::Ndof; c++) {
           q += u(k, j, i, c) * u(k, j, i, c);
         }
       },

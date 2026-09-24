@@ -174,6 +174,9 @@ public:
   static const PetscInt NA = 3;
   static const PetscInt NV = 3;
   static const PetscInt Ndof = Nphi + NA + NV;
+  // Where A and V start within the Ndof values of a site (G_node layout)
+  static const PetscInt OffsetA = Nphi;
+  static const PetscInt OffsetV = Nphi + NA;
 
   // Options controlling the clock
   ModelATime atime;

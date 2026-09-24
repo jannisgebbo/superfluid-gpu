@@ -9,6 +9,10 @@
 #include <petscdmda_kokkos.hpp>
 
 using KokkosMemSpace = Kokkos::DefaultExecutionSpace::memory_space;
+
+// What PETSc's DMDAVec{Get,Restore}KokkosOffsetViewDOF give: every extent,
+// including the dof, is a run-time value. (A static ModelAData::Ndof extent
+// was tried and made no measurable difference at 512^3.)
 using NodeView = Kokkos::Experimental::OffsetView<PetscScalar ****,
                                                   Kokkos::LayoutRight,
                                                   KokkosMemSpace>;

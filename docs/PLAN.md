@@ -221,6 +221,10 @@ main → Run
    Making i (contiguous) vary fastest across threads (`Iterate::Right` in
    `SitePolicy`) gave 2×. The CUDA default was k fastest. Headroom:
    `DiffusionStencil` runs at about 320 GB/s against about 1.5 TB/s peak.
+   Tried: a static `ModelAData::Ndof` last extent
+   (`OffsetView<PetscScalar ***[Ndof]>` re-wrapping PETSc's view). It was
+   correct and bit-identical, but made no measurable difference (under 1% at
+   512³), so it was backed out. Integer index arithmetic is not the limit.
    Next things to try: MDRange tile sizes or a 1D range policy, SoA versus
    AoS (currently G_node AoS), and fusing B substeps.
    Later: replace `nvector` (host walls, FFT buffers) with Kokkos views or
