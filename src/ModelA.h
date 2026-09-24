@@ -31,7 +31,7 @@
 struct ModelATime {
   PetscReal finaltime = 10.;
   PetscReal initialtime = 0.;
-  PetscReal deltat = 0.24;
+  PetscReal deltat = 0.5;
   PetscReal time = 0.;
 
   PetscReal t() const { return time; }
@@ -72,10 +72,10 @@ struct ModelACoefficients {
   PetscReal H = 0.003;
   PetscReal chi = 5;
 
-  PetscReal gamma = 1.;
-  PetscReal diffusion = 0.3333333;
+  PetscReal gamma = 0.25;
+  PetscReal diffusion = 0.25 / 3.;
 
-  PetscReal f2_constant = 1;
+  PetscReal f2_constant = 5;
   const PetscReal sigmabyf_constant = 0.946;
 
   PetscReal sigma() const { return diffusion * chi; }

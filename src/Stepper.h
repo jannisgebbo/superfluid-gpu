@@ -62,7 +62,7 @@ private:
 // splitting. 'A' = ideal Verlet step, 'B' = explicit diffusion step.
 class SuperSplitStep : public Stepper {
 public:
-  SuperSplitStep(ModelA &in, const std::string &step_sequence = "AB")
+  SuperSplitStep(ModelA &in, const std::string &step_sequence = "ABBBBBB")
       : model(&in), pv2(in), diffusion(in), steps(step_sequence),
         A_count(0), B_count(0) {
     for (char s : steps) {

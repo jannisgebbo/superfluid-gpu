@@ -140,7 +140,7 @@ void Run(nlohmann::json &inputs) {
   auto &etype = inputdata.ahandler.evolverType;
   if (etype == "SuperSplitStep") {
     std::string step_sequence =
-        inputs["SuperSplitStep"].value<std::string>("step_sequence", "AB");
+        inputs["SuperSplitStep"].value<std::string>("step_sequence", "ABBBBBB");
     PetscPrintf(PETSC_COMM_WORLD,
                 "Using the SuperSplitStep stepper step_sequence %s \n",
                 step_sequence.c_str());

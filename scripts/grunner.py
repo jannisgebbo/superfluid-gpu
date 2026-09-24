@@ -18,20 +18,20 @@ data = {
     # Time stepping
     "finaltime": 10,
     "initialtime": 0,
-    "deltat": 0.24,
+    "deltat": 0.5,
 
     # Action of O4 mdoel parameters
     "H": 0.003,
     "chi": 5.0,
 
     # Transport Coefficients
-    "gamma": 1.0,
-    "diffusion": 0.3333333,
+    "gamma": 0.25,
+    "diffusion": 0.25 / 3.0,
     # evolverType: the split stepper for the superfluid sector.
     #   'A' = ideal (Verlet) substep, 'B' = explicit diffusion substep.
     "evolverType": "SuperSplitStep",
     "SuperSplitStep": {
-        "step_sequence": "AB",
+        "step_sequence": "ABBBBBB",
     },
     "seed": 122335456,
     "outputfiletag": "grun",
