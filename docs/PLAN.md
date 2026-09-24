@@ -185,10 +185,24 @@ main → Run
    Kokkos vectors, device kernel, periodic ghost exchange) passes on 1 and 4
    GPUs. Build with `cmake -B build-gpu -DSFGPU_KOKKOS=ON` after sourcing
    `setupprlm-gpu.sh`. Multi-rank runs need `--gpu-bind=none`.
-2. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` (kick +
-   fused second drift, and the first drift) and
-   `ModelGExplicitDiffusionStep::step`. Every per-substep loop must be a
-   device kernel. Validate against the CPU code within a tolerance.
+   **Kokkos vectors alone** (`-dm_vec_type kokkos`, no code change) give
+   bit-identical output with the host loops unchanged; they are slower
+   because of host↔device syncs.
+   **Bit-for-bit checking of the port:** the GPU build uses
+   `-ffp-contract=off -fmad=false` (no fused multiply-add on host or device).
+   Without it the Cray CC wrapper's `-march=znver3` alone changes the last
+   bits. Test: NX=32, 4 ranks, one GPU node: (a) CPU build, (b) GPU build,
+   (c) GPU build with `-dm_vec_type kokkos`. All three are bit-identical
+   (work area `squench_comparisons/kokkosvec/`).
+   **Diffusion stencil ported (done):** `diffusion_stencil_kokkos` in
+   Stepper.cxx runs when the solution is a Kokkos vector. Output is
+   bit-identical to the host loop. At NX=32 the stencil is 10× faster, and
+   the B-stage uploads drop from 756 to 126 (one per step, after the host A
+   step).
+2. **Kokkos port** of the remaining loops: `IdealPV2::step_no_reject` (kick +
+   fused second drift, and the first drift). The rotation uses sin/cos,
+   whose CUDA versions differ from glibc in the last bit, so the A step is
+   validated within a tolerance, not bit-for-bit.
 3. Move the measurer's slice averages to Kokkos once host copies show up in
    the GPU profile. Measurement cost (6–8% on CPU) is otherwise not a
    concern; measure every 6–10 steps via `saveFrequency` if needed.

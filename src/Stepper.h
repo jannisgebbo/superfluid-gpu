@@ -41,13 +41,15 @@ private:
 // equation of Model G.
 class ModelGExplicitDiffusionStep : public Stepper {
 public:
-  ModelGExplicitDiffusionStep(ModelA &in) : model(&in) { ; }
+  ModelGExplicitDiffusionStep(ModelA &in);
   bool step(const double &dt) override;
   void finalize() override { ; }
   ~ModelGExplicitDiffusionStep() { ; }
 
 private:
   ModelA *model;
+  // Run the stencil as a Kokkos kernel (solution is a Kokkos vector)
+  bool use_kokkos = false;
 };
 
 /////////////////////////////////////////////////////////////////////////

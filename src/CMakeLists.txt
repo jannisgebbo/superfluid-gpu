@@ -36,4 +36,10 @@ target_link_libraries(SuperPions.exe PRIVATE modelg)
 if(SFGPU_KOKKOS)
     target_link_libraries(modelg PUBLIC Kokkos::kokkos)
     target_compile_definitions(modelg PUBLIC SFGPU_KOKKOS)
+    # No fused multiply-add, on the host (the Cray CC wrapper adds
+    # -march=znver3) or on the device (nvcc fuses by default). Every other
+    # operation used by the stencils is correctly rounded on both, so ported
+    # kernels can be checked bit-for-bit against the CPU build. The code is
+    # bandwidth bound, so this costs essentially nothing.
+    target_compile_options(modelg PUBLIC -ffp-contract=off -fmad=false)
 endif()

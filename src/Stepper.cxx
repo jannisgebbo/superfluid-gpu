@@ -1,3 +1,5 @@
+// First: PETSc requires its Kokkos headers before any other PETSc header
+#include "KokkosTypes.h"
 #include "Stepper.h"
 #include "ModelA.h"
 #include "O4AlgebraHelper.h"
@@ -181,6 +183,85 @@ void IdealPV2::finalize() { ; }
 //     dt * Gamma < 1/6    stability
 // and likewise with D for the charges. We conventionally keep
 // D = Gamma / 3, so the phi bound is the binding constraint.
+ModelGExplicitDiffusionStep::ModelGExplicitDiffusionStep(ModelA &in)
+    : model(&in) {
+#ifdef SFGPU_KOKKOS
+  use_kokkos = is_kokkos_vec(model->solution);
+#endif
+}
+
+#ifdef SFGPU_KOKKOS
+// Device version of the stencil loop in ModelGExplicitDiffusionStep::step:
+// the same arithmetic in the same order, so with -fmad=false it matches the
+// host loop bit-for-bit.
+static PetscErrorCode diffusion_stencil_kokkos(
+    DM da, Vec localU, Vec solution, const PetscReal (&Hin)[4], PetscReal axx,
+    PetscReal ayy, PetscReal azz, PetscReal dtG, PetscReal dtD, PetscReal f,
+    bool superfluidmode) {
+  PetscFunctionBeginUser;
+  PetscInt xs, ys, zs, xm, ym, zm;
+  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+
+  ConstNodeView phi;
+  NodeView phinew;
+  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, localU, &phi));
+  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, solution, &phinew));
+
+  const Kokkos::Array<PetscReal, 4> H = {Hin[0], Hin[1], Hin[2], Hin[3]};
+  const PetscReal tiny = std::numeric_limits<double>::min();
+  const PetscInt Nphi = ModelAData::Nphi, NA = ModelAData::NA;
+  const PetscInt Nq = ModelAData::NA + ModelAData::NV;
+
+  Kokkos::parallel_for(
+      "DiffusionStencil", SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
+      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+        // phi: nabla^2 phi, then the mass term (H[l] is H * sigma/f)
+        PetscReal p[4];
+        for (PetscInt l = 0; l < Nphi; l++) {
+          p[l] = phinew(k, j, i, l);
+          p[l] += dtG * (axx * (phi(k, j, i + 1, l) + phi(k, j, i - 1, l)) +
+                         ayy * (phi(k, j + 1, i, l) + phi(k, j - 1, i, l)) +
+                         azz * (phi(k + 1, j, i, l) + phi(k - 1, j, i, l)) -
+                         2. * (axx + ayy + azz) * phi(k, j, i, l));
+          p[l] += dtG * H[l];
+        }
+        if (superfluidmode) {
+          // Same as G_node::normalize_phi
+          PetscReal norm = 0.;
+          for (PetscInt l = 0; l < Nphi; l++) {
+            norm += p[l] * p[l];
+          }
+          if (norm > tiny) {
+            norm = Kokkos::sqrt(norm);
+            for (PetscInt l = 0; l < Nphi; l++) {
+              p[l] *= f / norm;
+            }
+          } else {
+            p[0] = f;
+          }
+        }
+        for (PetscInt l = 0; l < Nphi; l++) {
+          phinew(k, j, i, l) = p[l];
+        }
+
+        // Charges A (c = 4..6) then V (c = 7..9): nabla^2 with D
+        for (PetscInt c = Nphi; c < Nphi + Nq; c++) {
+          phinew(k, j, i, c) +=
+              dtD * (axx * (phi(k, j, i + 1, c) + phi(k, j, i - 1, c)) +
+                     ayy * (phi(k, j + 1, i, c) + phi(k, j - 1, i, c)) +
+                     azz * (phi(k + 1, j, i, c) + phi(k - 1, j, i, c)) -
+                     2. * (axx + ayy + azz) * phi(k, j, i, c));
+        }
+      });
+  // So the DiffusionStencil event times the kernel, not just its launch
+  Kokkos::fence();
+
+  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, solution, &phinew));
+  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &phi));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+#endif
+
 bool ModelGExplicitDiffusionStep::step(const double &dt) {
 
   auto &data = model->data;
@@ -192,12 +273,6 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
 
   // Fill in the ghost celss with mpicalls
   PetscCall(ghost_exchange(da, model->solution, localU));
-
-  // Get Access to arrays with drifted solution
-  G_node ***phi;
-  PetscCall(DMDAVecGetArrayRead(da, localU, &phi));
-  G_node ***phinew;
-  PetscCall(DMDAVecGetArray(da, model->solution, &phinew));
 
   const auto &coeff = data.acoefficients;
   PetscReal H[4] = {coeff.H, 0., 0., 0.};
@@ -216,9 +291,23 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
   DMDAGetCorners(da, &xstart, &ystart, &zstart, &xdimension, &ydimension,
                  &zdimension);
 
-  // Loop over central elements
   const auto &prof = Profiling::get();
   PetscLogEventBegin(prof.diffusion_stencil, 0, 0, 0, 0);
+#ifdef SFGPU_KOKKOS
+  if (use_kokkos) {
+    PetscCall(diffusion_stencil_kokkos(da, localU, model->solution, H, axx,
+                                       ayy, azz, dtG, dtD, f,
+                                       data.ahandler.superfluidmode));
+  } else
+#endif
+  {
+  // Get Access to arrays with drifted solution
+  G_node ***phi;
+  PetscCall(DMDAVecGetArrayRead(da, localU, &phi));
+  G_node ***phinew;
+  PetscCall(DMDAVecGetArray(da, model->solution, &phinew));
+
+  // Loop over central elements
   for (PetscInt k = zstart; k < zstart + zdimension; k++) {
     for (PetscInt j = ystart; j < ystart + ydimension; j++) {
       for (PetscInt i = xstart; i < xstart + xdimension; i++) {
@@ -269,12 +358,14 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
       }
     }
   }
+
+  PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
+  PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
+  }
   PetscLogFlops(Profiling::diffusion_stencil_flops * xdimension * ydimension *
                 zdimension);
   PetscLogEventEnd(prof.diffusion_stencil, 0, 0, 0, 0);
 
-  PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
-  PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
   PetscCall(DMRestoreLocalVector(da, &localU));
 
   return true;
