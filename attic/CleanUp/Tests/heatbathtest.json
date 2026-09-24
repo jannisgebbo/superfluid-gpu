@@ -1,0 +1,15 @@
+{
+    "H": 0.01,
+    "NX": 32,
+    "finaltime": 500,
+    "initialtime": 0,
+    "deltat": 0.05,
+    "saveFrequencyInTime": 1.0,
+    "mass": -4.813,
+    "lambda": 4,
+    "gamma": 1,
+    "seed": 122335456,
+    "outputfiletag": "heatbathtest",
+    "evolverType": 4,
+    "zeroStart": "true"
+}

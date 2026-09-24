@@ -1,0 +1,14 @@
+{
+    "H": 0.01,
+    "NX": 32,
+    "finaltime": 2,
+    "initialtime": 0,
+    "deltat": 0.01,
+    "saveFrequencyInTime": 1.0,
+    "mass": -4.813,
+    "lambda": 4,
+    "gamma": 1,
+    "seed": 122335456,
+    "outputfiletag": "smoothtest",
+    "evolverType": 3
+}

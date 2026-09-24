@@ -1,0 +1,15 @@
+{
+    "H": 0.0,
+    "NX": 32,
+    "finaltime": 1,
+    "initialtime": 0,
+    "deltat": 0.01,
+    "saveFrequencyInTime": 0.1,
+    "mass": -4.813,
+    "lambda": 4,
+    "gamma": 1,
+    "chi": 0.1,
+    "seed": 122335456,
+    "outputfiletag": "ideal",
+    "evolverType": 1
+}

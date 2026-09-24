@@ -1,0 +1,16 @@
+{
+    "H": 0.01,
+    "NX": 32,
+    "finaltime": 8.4,
+    "initialtime": 0,
+    "deltat": 0.04,
+    "saveFrequencyInTime": 0.33,
+    "mass": -4.813,
+    "lambda": 4,
+    "gamma": 1,
+    "chi": 5.1,
+    "seed": 122335456,
+    "restart": "false",
+    "outputfiletag": "testrestart2",
+    "evolverType": 7
+}

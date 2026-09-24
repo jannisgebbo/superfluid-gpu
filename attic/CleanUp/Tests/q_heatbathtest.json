@@ -1,0 +1,16 @@
+{
+    "H": 0.01,
+    "NX": 32,
+    "finaltime": 10.0,
+    "initialtime": 0,
+    "deltat": 0.5,
+    "saveFrequencyInTime": 0.5,
+    "mass": -4.813,
+    "lambda": 4,
+    "gamma": 1,
+    "diffusion": 1.66666666,
+    "chi": 0.9,
+    "seed": 122335456,
+    "outputfiletag": "q_heatbathtest",
+    "evolverType": 2
+}

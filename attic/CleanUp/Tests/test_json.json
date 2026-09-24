@@ -1,0 +1,18 @@
+{
+    "NX": 32,
+    "finaltime": 10,
+    "initialtime": 0,
+    "deltat": 0.04,
+    "evolverType": 7,
+    "mass": -4.813,
+    "lambda": 4.0,
+    "gamma": 1.0,
+    "H": 0.004,
+    "diffusion": 0.3333333,
+    "chi": 2.0,
+    "seed": 122335456,
+    "restart": "false",
+    "outputfiletag": "grun",
+    "outputfolder": "./",
+    "saveFrequencyInTime": 0.8
+}

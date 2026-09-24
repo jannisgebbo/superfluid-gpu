@@ -1,0 +1,7 @@
+*.o
+*.a
+*~
+*.swo
+*.swp
+*.exe
+gitversion.h

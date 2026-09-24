@@ -1,0 +1,26 @@
+{
+    "NX": 256,
+
+    "finaltime": 3.0,    
+    "initialtime": 0,
+    "deltat": 0.6,
+
+    "mass0": -4.70052,
+    "dmassdt": 0.00,
+
+    "lambda": 4,
+    "H": 0.002,
+    "chi": 5.0,
+    "gamma": 1,
+    "diffusion" : 0.3333333,
+
+    "evolverType" : "PV2HBSplit23",
+    "seed": 122335456,
+    "restart": false,
+    "outputfiletag": "testrun",
+    "saveFrequency": 3,
+    "thermalization_time": 0.0 ,
+
+    "eventmode": false,
+    "nevents": 1
+}

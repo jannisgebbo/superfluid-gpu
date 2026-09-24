@@ -1,0 +1,41 @@
+HEADRS = ModelA.h Stepper.h NoiseGenerator.h measurer.h plotter.h O4AlgebraHelper.h
+OBJS = measurer.o Stepper.o NoiseGenerator.o  jsoncpp.o
+
+SuperPions.exe: SuperPions.o $(OBJS)
+	CC -o $@ $^ $(LDLIBS) 
+
+x2k.exe : x2k.o $(OBJS)
+	CC -o $@ $^ $(LDLIBS) 
+
+x2k.o: x2k.cxx $(HEADRS)
+	CC -c $<
+
+SuperPions.o: SuperPions.cxx $(HEADRS)
+	CC -c  $<
+
+Stepper.o: Stepper.cxx $(HEADRS)
+	CC -c  $<
+
+measurer.o: measurer.cxx $(HEADRS)
+	CC -c  $<
+
+NoiseGenerator.o: NoiseGenerator.cxx NoiseGenerator.h
+	CC -c  $<
+
+jsoncpp.o: jsoncpp.cpp
+	CC -c  $<
+
+clean:
+	rm *.o
+
+print:
+	@echo CC=$(CC)
+	@echo CXX=$(CXX)
+	@echo FC=$(FC)
+	@echo CFLAGS=$(CFLAGS)
+	@echo CXXFLAGS=$(CXXFLAGS)
+	@echo FFLAGS=$(FFLAGS)
+	@echo CPPFLAGS=$(CPPFLAGS)
+	@echo LDFLAGS=$(LDFLAGS)
+	@echo LDLIBS=$(LDLIBS)
+	@echo LINK.cc=$(LINK.cc)
