@@ -54,18 +54,23 @@ UUID appended to the run tag (`grunner.prlmrun(nodeid=True)`).
 
 ## Stability bounds
 
-The bounds themselves live in comments in `src/Stepper.cxx`. Recap:
+The bounds themselves live in comments in `src/Stepper.cxx`. `SuperSplitStep`
+gives each substep `dt / (count of that letter)`, so with `ABBBBBB`:
+`dt_A = dt`, `dt_B = dt/6`. The 3D lattice Laplacian (a = 1) has
+`k̂² ∈ [0, 12]`.
 
-| Step | Bound | With defaults |
+| Step | Bound | With defaults (dt = 0.5, Γ = 0.25) |
 |---|---|---|
-| Ideal (Verlet) | `v · dt < a` with `v² = f²/χ = 1` | `dt < 1` (weak) |
-| Explicit diffusion, phi | `dt · Γ < 1/12 ≈ 0.083` | Binding constraint |
-| Explicit diffusion, charge | `dt · D < 1/12` | Weaker than Γ bound since D = Γ/3 |
+| Ideal (Verlet) | `ω_max · dt_A < 2`, `ω_max = v√12` → `dt_A < 1/√3 ≈ 0.577` (v = 1) | `ω_max·dt_A = 1.73`: **87% of limit — the tightest constraint** |
+| Diffusion, phi (forward Euler) | non-oscillatory `dt_B · Γ < 1/12`; stable `dt_B · Γ < 1/6` | `dt_B·Γ = 1/48`: 25% of the 1/12 bound |
+| Diffusion, charge | same with D | D = Γ/3, 3× further inside |
 
-**With the `ABBBBBB` subcycling** the effective diffusion timestep is `dt/6`,
-so the binding constraint becomes `(dt/6) · Γ < 1/12`, i.e.
-`dt · Γ < 1/2`. At the defaults `dt = 0.5, Γ = 0.25`: `dt·Γ = 0.125`,
-well inside.
+The diffusion step is forward Euler (first order). The full split step is
+first order anyway, since `ABBBBBB` is not a symmetric splitting.
+
+Other Γ at dt = 0.5, `ABBBBBB`: Γ = 0.5 gives `dt_B·Γ = 1/24` (50% of the
+1/12 bound); Γ = 1 sits exactly on 1/12 (the highest mode is zeroed each
+substep; still stable). The ideal-step margin is independent of Γ.
 
 ## Reference-run layout
 

@@ -16,12 +16,12 @@ IdealPV2::IdealPV2(ModelA &in)
   newEnergy = 0.;
 }
 
-// Position-Verlet update for the ideal (advective) sector. The CFL-like
-// stability bound is
-//     v * dt < a
-// with a the lattice spacing and v the characteristic wave speed. We
-// conventionally take v^2 = f^2 / chi = 1, so the bound reduces to
-// dt < a (a = 1 at the default lattice spacing hX = hY = hZ = 1).
+// Position-Verlet update for the ideal (advective) sector. Linearized about
+// phi_0 = f this is a wave equation with omega^2 = v^2 khat^2 + m^2, where
+// v^2 = f^2 / chi and khat^2 <= 12 / a^2 for the 3D nearest-neighbor
+// Laplacian. Verlet is stable for omega_max * dt < 2, i.e. (for small m)
+//     v * dt < a / sqrt(3) ~ 0.577 a
+// We conventionally take v^2 = f^2 / chi = 1 and a = 1, so dt < 0.577.
 bool IdealPV2::step(const double &dt) {
   oldEnergy = computeEnergy(dt);
   bool success = step_no_reject(dt);
@@ -237,13 +237,13 @@ void IdealPV2::finalize() { ; }
 
 /////////////////////////////////////////////////////////////////////////
 
-// Explicit second-order Runge-Kutta step for the deterministic diffusion
-// equations of Model G. Stability of the explicit scheme requires
-//     dt * Gamma < 1/12   (phi diffusion)
-//     dt * D     < 1/12   (charge diffusion)
-// We conventionally keep D = Gamma / 3, so the phi bound
-// (dt * Gamma < 1/12) is the binding constraint — the effective timestep
-// restriction comes from Gamma, not D.
+// Explicit forward-Euler step for the deterministic diffusion equations of
+// Model G (one ghost exchange, one stencil pass). Each lattice mode is
+// multiplied by 1 - dt * Gamma * khat^2 with khat^2 <= 12 (a = 1), so
+//     dt * Gamma < 1/12   no mode changes sign (non-oscillatory)
+//     dt * Gamma < 1/6    stability
+// and likewise with D for the charges. We conventionally keep
+// D = Gamma / 3, so the phi bound is the binding constraint.
 bool ModelGExplicitDiffusionStep::step(const double &dt) {
 
   auto &data = model->data;

@@ -9,35 +9,31 @@ Reach superfluid mode on GPU at 1024³ via PETSc + Kokkos. First milestone:
 strip this repo down to only the **superfluid-mode, noise-free** pathway so
 the surface area we port to Kokkos is minimal.
 
-Seed state: identical to `SuperQuench@c137ab88` (single commit). The two repos
-are allowed to diverge.
+Seed state: `SuperQuench@c137ab88`. The two repos are allowed to diverge.
 
-## Superfluid-mode pathway (what to keep)
+## Status (2026-09-24)
 
-Runtime selection: `superfluidmode = true` in JSON config
-([ModelA.h:154](../src/ModelA.h#L154), read at line 172).
-Constraint enforced in [scripts/grunner.py:91-95](../scripts/grunner.py#L91-L95):
-`superfluidmode=true` **requires** `evolverType = "SuperSplitStep"`.
+- `873e606` — pruning (phases 1–4 below) committed.
+- `745fa60` — defaults set to the reference-run values in both `ModelA.h`
+  and `scripts/grunner.py`: f² = χ = 5, dt = 0.5, `ABBBBBB`, Γ = 0.25,
+  D = Γ/3. `grunner.py` is the launch workflow; defaults are deliberately
+  kept in both places.
+- Laugh test (NX=32, 8 ranks, debug queue, same JSON + seed): SuperQuench and
+  the pruned code give identical `phi` output. Work area:
+  `/pscratch/sd/d/dteaney/squench_comparisons/`.
 
-The active call graph in superfluid mode:
+## Superfluid-mode pathway (what we kept)
 
-```
-SuperPions.cxx::Run  ── etype == "SuperSplitStep" branch ──▶ SuperSplitStep
-SuperSplitStep::step (Stepper.h:231)
-  ├── 'A' → IdealPV2::step               (deterministic Verlet)
-  └── 'B' → ModelGExplicitDiffusionStep  (deterministic; or implicit variant)
-```
+Runtime selection: `superfluidmode = true` and
+`evolverType = "SuperSplitStep"`; `grunner.checkinputs()` asserts both.
 
-Neither leg calls `NoiseGenerator` for anything that feeds back into the
-fields. `IdealPV2` calls `ModelARndm->uniform()` once per step for a
-Metropolis accept/reject that only affects statistics
-([Stepper.cxx:45](../src/Stepper.cxx#L45)) — the trajectory itself is
-deterministic.
+Nothing in the stepping path calls `NoiseGenerator`; the trajectory is
+deterministic given the initial conditions.
 
-**Keep (used by the superfluid pathway):**
+**Kept:**
 
-- `SuperPions.cxx` — main + `Run` (only the `SuperSplitStep` branch is live)
-- `Stepper.{h,cxx}` — `Stepper` base, `IdealPV2`, `ModelGDiffusionStep`,
+- `SuperPions.cxx` — main + `Run` (only `SuperSplitStep`)
+- `Stepper.{h,cxx}` — `Stepper` base, `IdealPV2`,
   `ModelGExplicitDiffusionStep`, `SuperSplitStep`
 - `ModelA.h` — all data structures, initialization, coefficients
 - `initialize.{h,cxx}` — shared initialization helpers
@@ -45,23 +41,7 @@ deterministic.
 - `measurer*.{h,cxx}`, `ntuple.h`, `nvector.h` — measurement + HDF5 output
 - `make_unique.h`, JSON in `nlohmann/`
 
-## What runs only in the noisy / non-superfluid pathway (removal candidates)
-
-All of the following are reachable only through `PV2HBSplit` (i.e.
-`evolverType ∈ {"PV2HBSplit23", "PV2HBSplitGeneral"}`), which the
-superfluid-mode guard forbids:
-
-| Symbol | Location | Why removable |
-|---|---|---|
-| `EulerLangevinHB` | [Stepper.h:124-136](../src/Stepper.h#L124-L136), [Stepper.cxx:285-432](../src/Stepper.cxx#L285-L432) | φ-field heat-bath with noise; only called by `PV2HBSplit` |
-| `ModelGChargeHB` | [Stepper.h:140-153](../src/Stepper.h#L140-L153), [Stepper.cxx:477-567](../src/Stepper.cxx#L477-L567) | charge heat-bath with noise; only called by `PV2HBSplit` |
-| `modelg_update_charge_pair` | [Stepper.cxx:453-475](../src/Stepper.cxx#L453-L475) | helper for `ModelGChargeHB` |
-| `g_face_case` / `g_face_cases` | [Stepper.h:156-165](../src/Stepper.h#L156-L165), [Stepper.cxx:442-450](../src/Stepper.cxx#L442-L450) | data for `ModelGChargeHB` |
-| `PV2HBSplit` | [Stepper.h:265-318](../src/Stepper.h#L265-L318), [Stepper.cxx:858-916](../src/Stepper.cxx#L858-L916) | the non-superfluid stepper itself |
-| `Run` non-superfluid branches | [SuperPions.cxx:203-229](../src/SuperPions.cxx#L203-L229) | `PV2HBSplit23`, `PV2HBSplitGeneral`, standalone `ModelGDiffusionStep` branches |
-| grunner.py non-superfluid config | [scripts/grunner.py:52-57, 97-101](../scripts/grunner.py#L52-L57) | `pv2hb_split_general` block + validation for non-superfluid |
-
-## Phase 4 — coefficient cleanup (uncommitted)
+## Phase 4 — coefficient cleanup (done, `873e606`)
 
 Removed from `ModelACoefficients`: `mass0`, `dmassdt`, `lambda`. All three
 were dead in the superfluid-only stepping path (`mass()` was only surfaced
@@ -76,7 +56,7 @@ for logging/HDF5, `lambda` was only used by the deleted heat-bath). Cascade:
   `get_kzfilename` / `get_qkzfilename` filename helpers deleted.
   `getdefault_filename` no longer includes mass in the name.
 
-## Phase 3 — ModelA.h cleanup (uncommitted)
+## Phase 3 — ModelA.h cleanup (done, `873e606`)
 
 Removed:
 - `initialize_gaussian_const()`, `initialize_random_domains()` (dead — no
@@ -101,14 +81,14 @@ Kept per user directive:
 Remaining initialization branches: `default`, `randomspins`, `gaussians`,
 `spinwaves`.
 
-## Phase 1 + 2 — done (uncommitted)
+## Phase 1 + 2 — done (`873e606`)
 
 Removed:
 - `EulerLangevinHB`, `ModelGChargeHB` (+ helpers `modelg_update_charge_pair`,
   `g_face_case`, `g_face_cases`), `PV2HBSplit`, `o4_stepper_monitor`
 - `thermalize_event` (function + both call sites in `initialize_event`).
-  `default` init is now a cold start with no thermalization; `quench_mode`
-  sets the quench mass and initializes at it but no longer thermalizes.
+  `default` init is now a cold start with no thermalization. (Quench mode
+  was removed entirely in phase 3.)
 - `ModelGDiffusionStep` (the Crank-Nicolson class) — entire class,
   including `Form3PointLaplacian`. **PETSc KSP is no longer needed by the
   stepping path.**
@@ -126,8 +106,8 @@ Removed:
 Config changes:
 - `ModelA.h` default `evolverType` → `"SuperSplitStep"`.
 - `grunner.py` default `evolverType` → `"SuperSplitStep"`, default
-  `superfluidmode` → `True`, added `SuperSplitStep` block with
-  `step_sequence: "AB"`.
+  `superfluidmode` → `True`, added `SuperSplitStep` block. (Default
+  `step_sequence` later set to `"ABBBBBB"` in `745fa60`.)
 
 Kept per user directive:
 - `NoiseGenerator.{h,cxx}` + `xoroshiro128plus.h`. Now truly unused in the
@@ -144,15 +124,20 @@ main → Run
              └── 'B' → ModelGExplicitDiffusionStep::step   (deterministic)
 ```
 
-## Still to decide
+## Next
 
-- **Reference config + regression check** — build the current tree on
-  Perlmutter, run a small case (e.g. NX=32), and save its trajectory as a
-  regression baseline before we start the Kokkos port.
-- **`NoiseGenerator` retention** — revisit once we're confident nothing new
-  needs an RNG.
+1. **Regression baseline** — `compare.py` in `squench_comparisons/` checks
+   every HDF5 dataset between two runs. Baseline = NX=32 run of SuperQuench
+   vs. SuperfluidGPU launched through its own `grunner.prlmrun`.
+2. **Profile** the CPU code at NX=256/512 with `-log_view`: split between
+   `IdealStep`, `ExplicitDiffusion`, and ghost exchange.
+3. **Build PETSc+Kokkos+CUDA** spack env at
+   `$CFS/m3722/opt/prlm/petsc-gpu-int64` (`+cuda +kokkos +kokkos-kernels
+   +openmp +int64 +hdf5 cuda_arch=80`).
+4. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` and
+   `ModelGExplicitDiffusionStep::step`.
 
-## Phase 3 (proposed)
-
-- Kokkos port of the surviving hot loops: `IdealPV2::step_no_reject` and
-  `ModelGExplicitDiffusionStep::step`.
+Open: `NoiseGenerator` retention — revisit once we're confident nothing new
+needs an RNG. Missing `SuperSplitStep` JSON block throws in `Run`
+(`inputs["SuperSplitStep"]` is null); harmless while `grunner` always
+writes it.
