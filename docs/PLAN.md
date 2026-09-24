@@ -5,7 +5,21 @@ is preserved alongside the code.
 
 ## Goal
 
-Reach superfluid mode on GPU at 1024³ via PETSc + Kokkos. First milestone:
+Fast superfluid mode on GPU via PETSc + Kokkos. **Target: one Perlmutter
+GPU node (4 × A100).** That fits about 960³ on 40 GB nodes and 1024³ on 80 GB
+nodes (`-C gpu&hbm80g`). A very fast 512³ already counts as success. The grid
+takes 80 B per site, and we keep two copies (`solution` + the ghosted local
+vector), so 512³ = 21.5 GB fits on a single 40 GB A100.
+
+Milestones: (1) 1 GPU / 1 rank, validated against the CPU code within a
+tolerance (nvcc fuses multiply-adds, so bit-identity is not expected);
+(2) 512³ on 1 GPU, profiled with the `Profiling.h` stages; (3) 4 GPUs on one
+node, with GPU-aware MPI over NVLink (`MPICH_GPU_SUPPORT_ENABLED=1`) and a
+GPU branch in `grunner.prlmrun`; (4) multi-node only if wanted.
+
+Rule for the port: every loop that runs per substep must be a Kokkos
+kernel (`DMDAVecGetKokkosOffsetViewDOF`). A host `DMDAVecGetArray` on a
+Kokkos vector forces a full device↔host copy. First milestone:
 strip this repo down to only the **superfluid-mode, noise-free** pathway so
 the surface area we port to Kokkos is minimal.
 
