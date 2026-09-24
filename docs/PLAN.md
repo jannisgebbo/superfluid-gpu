@@ -21,6 +21,11 @@ Seed state: `SuperQuench@c137ab88`. The two repos are allowed to diverge.
 - Laugh test (NX=32, 8 ranks, debug queue, same JSON + seed): SuperQuench and
   the pruned code give identical `phi` output. Work area:
   `/pscratch/sd/d/dteaney/squench_comparisons/`.
+- Regression baseline (NX=32, 128 ranks, each code launched through its own
+  `grunner.prlmrun`, seed 122335456): `compare.py` PASS — every dataset
+  bit-identical between SuperQuench@c137ab88 and SuperfluidGPU@f98d9d6.
+  Reference output: `squench_comparisons/baseline/baseline_sq/`. The random
+  initial conditions are seeded per rank, so comparisons need equal rank counts.
 
 ## Superfluid-mode pathway (what we kept)
 
