@@ -11,6 +11,8 @@
 struct Profiling {
   PetscLogStage ideal_stage, diffusion_stage, measure_stage;
 
+  // IdealKick includes the second half-drift, fused into the kick loop;
+  // IdealRotate is the first half-drift only.
   PetscLogEvent ideal_step, diffusion_step;
   PetscLogEvent ghost_exchange, ideal_kick, ideal_rotate, diffusion_stencil;
   PetscLogEvent ref_copy;

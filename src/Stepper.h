@@ -30,6 +30,7 @@ private:
 
   bool step_no_reject(const double &dt);
   void rotatePhi(G_node ***phinew, double dt);
+  void rotateSite(G_node &node, double dt) const;
 
   // Minor optimization
   PetscInt xstart, ystart, zstart, xdimension, ydimension, zdimension;

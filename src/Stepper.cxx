@@ -124,6 +124,11 @@ bool IdealPV2::step_no_reject(const double &dt) {
 
           phinew[k][j][i].V[s] += dt * (advxx + advyy + advzz);
         }
+
+        // drifts dt / 2.0. Safe inside the kick loop: the kick reads phi
+        // only from the ghosted copy, and the drift of this site needs only
+        // its own kicked charges.
+        rotateSite(phinew[k][j][i], dt / 2.0);
       }
     }
   }
@@ -131,11 +136,6 @@ bool IdealPV2::step_no_reject(const double &dt) {
   PetscLogFlops(Profiling::ideal_kick_flops * xdimension * ydimension *
                 zdimension);
   PetscLogEventEnd(prof.ideal_kick, 0, 0, 0, 0);
-
-  // drifts dt / 2.0
-  PetscLogEventBegin(prof.ideal_rotate, 0, 0, 0, 0);
-  rotatePhi(phinew, dt / 2.0);
-  PetscLogEventEnd(prof.ideal_rotate, 0, 0, 0, 0);
 
   PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
   PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
@@ -145,29 +145,29 @@ bool IdealPV2::step_no_reject(const double &dt) {
 }
 
 void IdealPV2::rotatePhi(G_node ***phinew, double dt) {
-
-  const auto &coeff = data.acoefficients;
   for (PetscInt k = zstart; k < zstart + zdimension; k++) {
     for (PetscInt j = ystart; j < ystart + ydimension; j++) {
       for (PetscInt i = xstart; i < xstart + xdimension; i++) {
-
-        // here we have to convert the charge from the chemical potential
-        PetscScalar axialmu[ModelAData::NA], vectormu[ModelAData::NV];
-
-        for (PetscInt s = 0; s < ModelAData::NV; s++) {
-
-          vectormu[s] = -phinew[k][j][i].V[s] / coeff.chi * dt;
-        }
-
-        for (PetscInt s = 0; s < ModelAData::NA; s++) {
-
-          axialmu[s] = -phinew[k][j][i].A[s] / coeff.chi * dt;
-        }
-
-        O4AlgebraHelper::O4Rotation(vectormu, axialmu, phinew[k][j][i].f);
+        rotateSite(phinew[k][j][i], dt);
       }
     }
   }
+}
+
+// Rotates phi at one site by the charges (converted to chemical potentials)
+void IdealPV2::rotateSite(G_node &node, double dt) const {
+  const auto &coeff = data.acoefficients;
+  PetscScalar axialmu[ModelAData::NA], vectormu[ModelAData::NV];
+
+  for (PetscInt s = 0; s < ModelAData::NV; s++) {
+    vectormu[s] = -node.V[s] / coeff.chi * dt;
+  }
+
+  for (PetscInt s = 0; s < ModelAData::NA; s++) {
+    axialmu[s] = -node.A[s] / coeff.chi * dt;
+  }
+
+  O4AlgebraHelper::O4Rotation(vectormu, axialmu, node.f);
 }
 
 void IdealPV2::finalize() { ; }
