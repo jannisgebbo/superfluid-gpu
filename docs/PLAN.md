@@ -44,7 +44,7 @@ deterministic given the initial conditions.
 - `initialize.{h,cxx}` — shared initialization helpers
 - `O4AlgebraHelper.h` — used by `IdealPV2`
 - `measurer*.{h,cxx}`, `ntuple.h`, `nvector.h` — measurement + HDF5 output
-- `make_unique.h`, JSON in `nlohmann/`
+- JSON in `nlohmann/` (`make_unique.h` removed; using `std::make_unique`)
 
 ## Phase 4 — coefficient cleanup (done, `873e606`)
 

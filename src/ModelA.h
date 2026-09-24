@@ -9,8 +9,8 @@
 #ifndef MODELA_NO_HDF5
 #include <petscviewerhdf5.h>
 #endif
-#include "make_unique.h"
 #include "nlohmann/json.hpp"
+#include <memory>
 
 // This header file defines the structure and behavior of a simulation model
 // called ModelA. It includes necessary libraries and defines several classes
@@ -310,7 +310,7 @@ public:
 
     DMCreateGlobalVector(domain, &solution);
 
-    ModelARndm = make_unique<NoiseGenerator>(data.ahandler.seed);
+    ModelARndm = std::make_unique<NoiseGenerator>(data.ahandler.seed);
 
     // Printout store the rank
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);

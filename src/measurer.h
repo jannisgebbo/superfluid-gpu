@@ -2,11 +2,11 @@
 #define MEASURER
 
 #include "ModelA.h"
-// #include "make_unique.h"
 #include "nvector.h"
 #include <array>
 #include <complex>
 #include <fftw3.h>
+#include <memory>
 #include <vector>
 
 ////////////////////////////////////////////////////////////////////////
@@ -141,7 +141,7 @@ public:
     int rank = -1;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
     if (rank == 0) {
-       fftw = make_unique<measurer_fft>(N);
+       fftw = std::make_unique<measurer_fft>(N);
     }
 
 
