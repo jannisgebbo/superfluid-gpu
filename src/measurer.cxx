@@ -1,3 +1,5 @@
+// First: PETSc requires its Kokkos headers before any other PETSc header
+#include "KokkosTypes.h"
 #include "measurer.h"
 #include "Profiling.h"
 #include "nvector.h"
@@ -259,6 +261,220 @@ void Measurer::computeSliceAveragePhase(Vec *solution) {
     MPI_Reduce(&wallZPhaseLocal(l, 0), &wallZPhase(l, 0), N, MPIU_SCALAR,
                MPI_SUM, 0, PETSC_COMM_WORLD);
   }
+}
+
+#ifdef SFGPU_KOKKOS
+// Per-site observables summed into the slice averages: entries 0..NObs-1
+// are X = (phi[4], A[3], V[3], phi2) as in computeSliceAverage, and entries
+// NObs..NObs+NObsPhase-1 are (sigma, n[4], A'[4], V'[4], sigma^2) as in
+// computeSliceAveragePhase.
+struct SliceObs {
+  static const int NTot = Measurer::NObs + Measurer::NObsPhase;
+  double v[NTot];
+  KOKKOS_INLINE_FUNCTION SliceObs() {
+    for (int o = 0; o < NTot; o++) v[o] = 0.;
+  }
+  KOKKOS_INLINE_FUNCTION SliceObs &operator+=(const SliceObs &b) {
+    for (int o = 0; o < NTot; o++) v[o] += b.v[o];
+    return *this;
+  }
+};
+
+namespace Kokkos {
+template <> struct reduction_identity<SliceObs> {
+  KOKKOS_FORCEINLINE_FUNCTION static SliceObs sum() { return SliceObs(); }
+};
+} // namespace Kokkos
+
+// Adds the observables of site (k, j, i) to acc. Same formulas as the host
+// loops (contract_rho and dualize_rho written out).
+KOKKOS_INLINE_FUNCTION void add_site_obs(const ConstNodeView &u, PetscInt k,
+                                         PetscInt j, PetscInt i,
+                                         SliceObs &acc) {
+  const int NObs = Measurer::NObs;
+  double phi[4], rho[6];
+  double phi2 = 0.;
+  for (int l = 0; l < 4; l++) {
+    phi[l] = u(k, j, i, l);
+    acc.v[l] += phi[l];
+    phi2 += phi[l] * phi[l];
+  }
+  for (int l = 0; l < 3; l++) {
+    rho[l] = u(k, j, i, 4 + l);     // A
+    rho[l + 3] = u(k, j, i, 7 + l); // V
+    acc.v[4 + l] += rho[l];
+    acc.v[7 + l] += rho[l + 3];
+  }
+  acc.v[10] += phi2;
+
+  // Rotated to the local direction n = phi / sigma
+  const double sigma = Kokkos::sqrt(phi2);
+  double n[4] = {1., 0., 0., 0.};
+  if (phi2 > 100. * Kokkos::Experimental::norm_min_v<double>) {
+    for (int l = 0; l < 4; l++) n[l] = phi[l] / sigma;
+  }
+  const double *r = rho;
+  const double rd[6] = {rho[3], rho[4], rho[5], rho[0], rho[1], rho[2]};
+  const double A[4] = {-(n[1] * r[0]) - n[2] * r[1] - n[3] * r[2],
+                       n[0] * r[0] + n[3] * r[4] - n[2] * r[5],
+                       n[0] * r[1] - n[3] * r[3] + n[1] * r[5],
+                       n[0] * r[2] + n[2] * r[3] - n[1] * r[4]};
+  const double V[4] = {-(n[1] * rd[0]) - n[2] * rd[1] - n[3] * rd[2],
+                       n[0] * rd[0] + n[3] * rd[4] - n[2] * rd[5],
+                       n[0] * rd[1] - n[3] * rd[3] + n[1] * rd[5],
+                       n[0] * rd[2] + n[2] * rd[3] - n[1] * rd[4]};
+  acc.v[NObs + 0] += sigma;
+  for (int l = 0; l < 4; l++) {
+    acc.v[NObs + 1 + l] += n[l];
+    acc.v[NObs + 5 + l] += A[l];
+    acc.v[NObs + 9 + l] += V[l];
+  }
+  acc.v[NObs + Measurer::NObsPhase - 1] += sigma * sigma;
+}
+
+// Sums the site observables over each plane of one direction (dir = 0, 1, 2
+// for x, y, z walls) with one team per plane. Deterministic: no atomics.
+// Returns W(p, o) on the host for the local planes p = 0..nplanes-1.
+static Kokkos::View<double **>::host_mirror_type
+plane_sums(const ConstNodeView &u, int dir, PetscInt xs, PetscInt ys,
+           PetscInt zs, PetscInt xm, PetscInt ym, PetscInt zm) {
+  const PetscInt nplanes = dir == 0 ? xm : (dir == 1 ? ym : zm);
+  // The two other directions, fastest (contiguous in memory) last
+  const PetscInt n1 = dir == 2 ? ym : zm;
+  const PetscInt n2 = dir == 0 ? ym : xm;
+  Kokkos::View<double **> W("plane_sums", nplanes, SliceObs::NTot);
+
+  using Team = Kokkos::TeamPolicy<>::member_type;
+  Kokkos::parallel_for(
+      "SlicePlanes", Kokkos::TeamPolicy<>(nplanes, Kokkos::AUTO),
+      KOKKOS_LAMBDA(const Team &team) {
+        const PetscInt p = team.league_rank();
+        SliceObs sum;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(team, n1 * n2),
+            [&](PetscInt idx, SliceObs &acc) {
+              const PetscInt a = idx / n2, b = idx % n2;
+              PetscInt k, j, i;
+              if (dir == 0) {
+                k = zs + a, j = ys + b, i = xs + p;
+              } else if (dir == 1) {
+                k = zs + a, j = ys + p, i = xs + b;
+              } else {
+                k = zs + p, j = ys + a, i = xs + b;
+              }
+              add_site_obs(u, k, j, i, acc);
+            },
+            sum);
+        Kokkos::single(Kokkos::PerTeam(team), [&]() {
+          for (int o = 0; o < SliceObs::NTot; o++) W(p, o) = sum.v[o];
+        });
+      });
+  return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), W);
+}
+
+// The three sums of the energy, same terms as Measurer::computeEnergy
+static void energy_terms(const ConstNodeView &u, PetscInt xs, PetscInt ys,
+                         PetscInt zs, PetscInt xm, PetscInt ym, PetscInt zm,
+                         PetscReal H0, PetscScalar &grad2, PetscScalar &nab2,
+                         PetscScalar &hEn) {
+  Kokkos::parallel_reduce(
+      "Energy", SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
+      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i, PetscScalar & g,
+                    PetscScalar & q, PetscScalar & h) {
+        for (int s = 0; s < 4; s++) {
+          const PetscScalar mid = u(k, j, i, s);
+          const PetscScalar dz = u(k + 1, j, i, s) - mid;
+          const PetscScalar dy = u(k, j + 1, i, s) - mid;
+          const PetscScalar dx = u(k, j, i + 1, s) - mid;
+          g += dz * dz + dy * dy + dx * dx;
+        }
+        h += u(k, j, i, 0) * H0;
+        for (int c = 4; c < 10; c++) {
+          q += u(k, j, i, c) * u(k, j, i, c);
+        }
+      },
+      grad2, nab2, hEn);
+}
+#endif
+
+// Sums the local walls of all ranks into global on rank 0
+static void reduce_walls(nvector<PetscScalar, 2> &local,
+                         nvector<PetscScalar, 2> &global, PetscInt nobs,
+                         PetscInt N) {
+  for (int l = 0; l < nobs; l++) {
+    MPI_Reduce(&local(l, 0), &global(l, 0), N, MPIU_SCALAR, MPI_SUM, 0,
+               PETSC_COMM_WORLD);
+  }
+}
+
+void Measurer::computeSliceAverages(Vec *solution) {
+#ifdef SFGPU_KOKKOS
+  if (is_kokkos_vec(*solution)) {
+    DM &da = model->domain;
+    Vec localU;
+    DMGetLocalVector(da, &localU);
+    // Ghost cells are needed only for the gradient in the energy
+    ghost_exchange(da, *solution, localU);
+
+    PetscInt xs, ys, zs, xm, ym, zm;
+    DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
+
+    ConstNodeView u;
+    DMDAVecGetKokkosOffsetViewDOF(da, localU, &u);
+
+    // Slice averages: plane sums on the device, then the same
+    // normalization and reduction as the host loops
+    nvector<PetscScalar, 2> wallLocal[3], wallPhaseLocal[3];
+    const PetscInt start[3] = {xs, ys, zs};
+    for (int dir = 0; dir < 3; dir++) {
+      wallLocal[dir].resize(NObs, N);
+      wallPhaseLocal[dir].resize(NObsPhase, N);
+      std::fill(wallLocal[dir].v.begin(), wallLocal[dir].v.end(), 0.);
+      std::fill(wallPhaseLocal[dir].v.begin(), wallPhaseLocal[dir].v.end(),
+                0.);
+      auto W = plane_sums(u, dir, xs, ys, zs, xm, ym, zm);
+      for (PetscInt p = 0; p < (PetscInt)W.extent(0); p++) {
+        for (int o = 0; o < NObs; o++) {
+          wallLocal[dir](o, start[dir] + p) = W(p, o) / PetscReal(N * N);
+        }
+        for (int o = 0; o < NObsPhase; o++) {
+          wallPhaseLocal[dir](o, start[dir] + p) =
+              W(p, NObs + o) / PetscReal(N * N);
+        }
+      }
+    }
+
+    // Energy, same terms as computeEnergy
+    const auto &data = model->data;
+    const auto &coeff = data.acoefficients;
+    const PetscReal H0 = coeff.H * coeff.sigmabyf(data.atime.t());
+    PetscScalar grad2 = 0, nab2 = 0, hEn = 0;
+    energy_terms(u, xs, ys, zs, xm, ym, zm, H0, grad2, nab2, hEn);
+
+    DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u);
+    DMRestoreLocalVector(da, &localU);
+
+    std::fill(wallX.v.begin(), wallX.v.end(), 0.);
+    std::fill(wallY.v.begin(), wallY.v.end(), 0.);
+    std::fill(wallZ.v.begin(), wallZ.v.end(), 0.);
+    std::fill(wallXPhase.v.begin(), wallXPhase.v.end(), 0.);
+    std::fill(wallYPhase.v.begin(), wallYPhase.v.end(), 0.);
+    std::fill(wallZPhase.v.begin(), wallZPhase.v.end(), 0.);
+    reduce_walls(wallLocal[0], wallX, NObs, N);
+    reduce_walls(wallLocal[1], wallY, NObs, N);
+    reduce_walls(wallLocal[2], wallZ, NObs, N);
+    reduce_walls(wallPhaseLocal[0], wallXPhase, NObsPhase, N);
+    reduce_walls(wallPhaseLocal[1], wallYPhase, NObsPhase, N);
+    reduce_walls(wallPhaseLocal[2], wallZPhase, NObsPhase, N);
+
+    PetscScalar localEnergy = 0.5 / coeff.chi * nab2 + 0.5 * grad2 - hEn;
+    MPI_Reduce(&localEnergy, &energy, 1, MPIU_SCALAR, MPI_SUM, 0,
+               PETSC_COMM_WORLD);
+    return;
+  }
+#endif
+  computeSliceAverage(solution);
+  computeSliceAveragePhase(solution);
 }
 
 // Given the fourier transform of phi_a(t,k) and other fields

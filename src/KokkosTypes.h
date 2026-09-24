@@ -16,9 +16,12 @@ using ConstNodeView =
     Kokkos::Experimental::OffsetView<const PetscScalar ****,
                                      Kokkos::LayoutRight, KokkosMemSpace>;
 
-// Loop over the owned sites (k, j, i) of a rank
-using SitePolicy =
-    Kokkos::MDRangePolicy<Kokkos::Rank<3>, Kokkos::IndexType<PetscInt>>;
+// Loop over the owned sites (k, j, i) of a rank. Iterate::Right makes i
+// (contiguous in memory) vary fastest across threads, so neighboring threads
+// read neighboring sites; the CUDA default iterates k fastest.
+using SitePolicy = Kokkos::MDRangePolicy<
+    Kokkos::Rank<3, Kokkos::Iterate::Right, Kokkos::Iterate::Right>,
+    Kokkos::IndexType<PetscInt>>;
 
 // True if v is a Kokkos vector (-dm_vec_type kokkos), i.e. lives on the GPU
 inline bool is_kokkos_vec(Vec v) {

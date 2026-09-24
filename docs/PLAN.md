@@ -208,9 +208,23 @@ main → Run
    not bit-identical only because CUDA's sin/cos differ from glibc. **The
    stepping path now has zero host↔device transfers.** At NX=32 the kernels
    are 10–30× faster and the total is exchange-latency bound.
-3. Move the measurer's slice averages to Kokkos once host copies show up in
-   the GPU profile. Measurement cost (6–8% on CPU) is otherwise not a
-   concern; measure every 6–10 steps via `saveFrequency` if needed.
+3. ~~Measurer on the device~~ **done**: slice averages and phase slice
+   averages use one Kokkos team per plane, a deterministic reduction with no
+   atomics. The energy is a `parallel_reduce`. Only the small per-plane sums
+   come to the host, with no grid downloads. The results agree with the CPU
+   build to roundoff (walls ≤ 7e-15 absolute, energy 1.3e-14 relative,
+   because the summation order differs).
+   **First GPU performance (2026-09-24), 1 node, 4 × A100,
+   `-dm_vec_type kokkos`** (work area `squench_comparisons/gpuprofile/`):
+   512³ is 0.185 s/step, against about 2.0 s/step on a 128-rank CPU node, so
+   about 11×. 256³: see N256. The ghost exchange is only about 2 ms/call.
+   Making i (contiguous) vary fastest across threads (`Iterate::Right` in
+   `SitePolicy`) gave 2×. The CUDA default was k fastest. Headroom:
+   `DiffusionStencil` runs at about 320 GB/s against about 1.5 TB/s peak.
+   Next things to try: MDRange tile sizes or a 1D range policy, SoA versus
+   AoS (currently G_node AoS), and fusing B substeps.
+   Later: replace `nvector` (host walls, FFT buffers) with Kokkos views or
+   `Kokkos::mdspan`, once Kokkos is required in every build.
 4. GPU branch in `grunner.prlmrun` (`-C gpu`, `-A m3722_g`, 4 ranks,
    `--gpu-bind=none`).
 

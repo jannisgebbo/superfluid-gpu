@@ -182,8 +182,7 @@ public:
     int rank = -1;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
 
-    computeSliceAverage(solution);
-    computeSliceAveragePhase(solution);
+    computeSliceAverages(solution);
 
     // Take the FFT and other steps based on the data collected
     if (rank == 0) {
@@ -195,6 +194,9 @@ public:
   PetscInt getN() { return N; }
 
 private:
+  // Slice averages, phase slice averages and energy: on the device if the
+  // solution is a Kokkos vector, otherwise with the host loops below
+  void computeSliceAverages(Vec *solution);
   void computeSliceAverage(Vec *solution);
   void computeEnergy(G_node ***fld);
   void computeSliceAveragePhase(Vec *solution);
