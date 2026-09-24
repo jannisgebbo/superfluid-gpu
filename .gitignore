@@ -7,4 +7,5 @@
 gitversion.h
 build/
 build-gpu/
+build-omp/
 __pycache__/

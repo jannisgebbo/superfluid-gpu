@@ -41,5 +41,8 @@ if(SFGPU_KOKKOS)
     # operation used by the stencils is correctly rounded on both, so ported
     # kernels can be checked bit-for-bit against the CPU build. The code is
     # bandwidth bound, so this costs essentially nothing.
-    target_compile_options(modelg PUBLIC -ffp-contract=off -fmad=false)
+    target_compile_options(modelg PUBLIC -ffp-contract=off)
+    if(Kokkos_ENABLE_CUDA)
+        target_compile_options(modelg PUBLIC -fmad=false)
+    endif()
 endif()

@@ -227,6 +227,19 @@ main → Run
    512³), so it was backed out. Integer index arithmetic is not the limit.
    Next things to try: MDRange tile sizes or a 1D range policy, SoA versus
    AoS (currently G_node AoS), and fusing B substeps.
+   **Kokkos on CPU (OpenMP backend), 2026-09-24**
+   (`squench_comparisons/ompbench/`, one CPU node, 512³, per step):
+   | build | ranks × threads | s/step | measurement |
+   |---|---|---|---|
+   | CPU (host loops) | 128 × 1 | 1.87 | 0.74 s |
+   | Kokkos/OpenMP | 128 × 1 | 1.82 | 0.44 s |
+   | Kokkos/OpenMP | 32 × 4 | 1.63 | 0.29 s |
+   | Kokkos/OpenMP | **16 × 8** | **1.60** | 0.28 s |
+   | Kokkos/OpenMP | 8 × 16 | 1.68 | 0.29 s |
+   So 14% faster than the CPU build, as expected for bandwidth-bound code.
+   A GPU node (0.185 s/step) is about 8.6× the best CPU node. At 128 × 1 the
+   NX=32 regression is bit-identical to SuperQuench, so the Kokkos kernels
+   compute exactly the original algorithm.
    Later: replace `nvector` (host walls, FFT buffers) with Kokkos views or
    `Kokkos::mdspan`, once Kokkos is required in every build.
 4. GPU branch in `grunner.prlmrun` (`-C gpu`, `-A m3722_g`, 4 ranks,

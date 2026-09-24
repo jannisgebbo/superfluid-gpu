@@ -200,3 +200,25 @@ srun --jobid=<id> -n 4 --gpus-per-node=4 --gpu-bind=none \
   vectors, a device kernel, and a periodic ghost exchange. It prints PASS
   and `vec=mpikokkos exec=Cuda`. It passed on 1 GPU and on 4 GPUs
   (2026-09-24).
+
+# CPU build with Kokkos (OpenMP backend)
+=========================================
+
+The same Kokkos kernels also run on CPU nodes with the OpenMP backend.
+PETSc + Kokkos without CUDA is installed at
+`/global/cfs/cdirs/m3722/opt/prlm/petsc-cpu-kokkos-int64`. It was built by
+`build-petsc-cpu-kokkos.sh` on an interactive CPU node in about 9 minutes, and
+`make check` passed fully. `module load cpu` must come first: the default
+`gpu` module set makes `CC` link the CUDA MPI library, and the binaries then
+do not start on CPU nodes.
+
+```bash
+source platforms/perlmutter/setupprlm-omp.sh
+cmake -S . -B build-omp -DSFGPU_KOKKOS=ON
+cmake --build build-omp -j 16
+# e.g. 16 ranks x 8 threads on one CPU node (-c counts hardware threads)
+OMP_NUM_THREADS=8 srun -n 16 -c 16 --cpu-bind=cores \
+    build-omp/src/SuperPions.exe -input run.json -dm_vec_type kokkos
+```
+With one thread per rank, the NX=32 regression (128 ranks) is bit-identical
+to SuperQuench, including the slice averages.
