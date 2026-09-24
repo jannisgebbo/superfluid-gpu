@@ -69,10 +69,6 @@ struct ModelATime {
 // POD structure for the thermodynamic and transport coefficients.
 struct ModelACoefficients {
 
-  PetscReal mass0 = -4.70052;
-  PetscReal dmassdt = 0.;
-
-  PetscReal lambda = 4.;
   PetscReal H = 0.003;
   PetscReal chi = 5;
 
@@ -81,9 +77,6 @@ struct ModelACoefficients {
 
   PetscReal f2_constant = 1;
   const PetscReal sigmabyf_constant = 0.946;
-
-  // Returns the value of the mass at a given time t.
-  PetscReal mass(const double &t) const { return mass0 + dmassdt * t; }
 
   PetscReal sigma() const { return diffusion * chi; }
   PetscReal Gamma() const { return gamma; }
@@ -94,10 +87,6 @@ struct ModelACoefficients {
   PetscReal sigmabyf(const double &t) const { return sigmabyf_constant; }
 
   void read(nlohmann::json &params) {
-    mass0 = params.value("mass0", mass0);
-    dmassdt = params.value("dmassdt", 0.);
-
-    lambda = params.value("lambda", lambda);
     H = params.value("H", H);
     chi = params.value("chi", chi);
 
@@ -108,10 +97,6 @@ struct ModelACoefficients {
   }
 
   void print() {
-    PetscPrintf(PETSC_COMM_WORLD, "mass0 = %e\n", mass0);
-    PetscPrintf(PETSC_COMM_WORLD, "dmassdt = %e\n", dmassdt);
-
-    PetscPrintf(PETSC_COMM_WORLD, "lambda = %e\n", lambda);
     PetscPrintf(PETSC_COMM_WORLD, "H = %e\n", H);
     PetscPrintf(PETSC_COMM_WORLD, "chi = %e\n", chi);
     PetscPrintf(PETSC_COMM_WORLD, "gamma = %e\n", gamma);
@@ -124,13 +109,10 @@ struct ModelACoefficients {
 // Lightweight data structure with access to options
 struct ModelAHandlerData {
 
-  std::string evolverType = "PV2HBSplit23";
+  std::string evolverType = "SuperSplitStep";
 
   // random seed
   int seed = 10;
-
-  // If we are to restore
-  bool restart = false;
 
   // Options controlling the output. The outputfiletag labells the run. All
   // output files are tag_foo.txt, or tag_bar.h5
@@ -141,33 +123,18 @@ struct ModelAHandlerData {
   bool eventmode = false;
   int nevents = 1;
   int current_event = 0;
-  double thermalization_time = 0.;
-
-  // Quench Mode:
-  //
-  // In quench mode we start with some mass, quench_mode_mass0, and
-  // thermalize the system with that mass. At time t=0 we start the simulation
-  // with a different mass, as given by acoefficients.mass0
-  bool quench_mode = false;
-  double quench_mode_mass0 = -4.70052;
 
   bool superfluidmode = false;
 
   void read(nlohmann::json &params) {
     evolverType = params.value("evolverType", evolverType);
     seed = params.value("seed", seed);
-    restart = params.value("restart", false);
     outputfiletag = params.value("outputfiletag", "o4output");
     saveFrequency = params.value("saveFrequency", saveFrequency);
     writeFrequency = params.value("writeFrequency", writeFrequency);
 
     eventmode = params.value("eventmode", eventmode);
     nevents = params.value("nevents", nevents);
-    thermalization_time =
-        params.value("thermalization_time", thermalization_time);
-
-    quench_mode = params.value("quench_mode", quench_mode);
-    quench_mode_mass0 = params.value("quench_mode_mass0", quench_mode_mass0);
 
     superfluidmode = params.value("superfluidmode", superfluidmode);
   }
@@ -175,8 +142,6 @@ struct ModelAHandlerData {
   void print() {
     PetscPrintf(PETSC_COMM_WORLD, "evolverType = %s\n", evolverType.c_str());
     PetscPrintf(PETSC_COMM_WORLD, "seed = %d\n", seed);
-    PetscPrintf(PETSC_COMM_WORLD, "restart = %s\n",
-                (restart ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "outputfiletag = %s\n",
                 outputfiletag.c_str());
     PetscPrintf(PETSC_COMM_WORLD, "saveFrequency = %d\n", saveFrequency);
@@ -185,13 +150,6 @@ struct ModelAHandlerData {
     PetscPrintf(PETSC_COMM_WORLD, "eventmode = %s\n",
                 (eventmode ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "nevents = %d\n", nevents);
-    PetscPrintf(PETSC_COMM_WORLD, "thermalization_time = %e\n",
-                thermalization_time);
-
-    PetscPrintf(PETSC_COMM_WORLD, "quench_mode = %s\n",
-                (quench_mode ? "true" : "false"));
-    PetscPrintf(PETSC_COMM_WORLD, "quench_mode_mass0 = %e\n",
-                quench_mode_mass0);
 
     PetscPrintf(PETSC_COMM_WORLD, "superfluidmode = %s\n",
                 (superfluidmode ? "true" : "false"));
@@ -230,8 +188,6 @@ public:
   // Thermodynamic and transport coefficients
   ModelACoefficients acoefficients;
 
-  // Convenience function for returning the mass at the current time
-  PetscReal mass() const { return acoefficients.mass(atime.t()); }
   // Convenience function for returning f2 at the current time
   PetscReal f2() const { return acoefficients.f2(atime.t()); }
 
@@ -354,63 +310,42 @@ public:
 
     DMCreateGlobalVector(domain, &solution);
 
-    // Setup the random number generation. If we are in in restart mode then we
-    // try to read in the random number generator too.
-    const auto &ahandler = data.ahandler;
-    ModelARndm = make_unique<NoiseGenerator>(ahandler.seed);
-    if (ahandler.restart and !ahandler.eventmode) {
-      ModelARndm->read(ahandler.outputfiletag);
-    }
+    ModelARndm = make_unique<NoiseGenerator>(data.ahandler.seed);
 
     // Printout store the rank
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
 
   void finalize() {
-    const auto &ahandler = data.ahandler;
-
-    // When running in box mode we save the output and the
-    // random number stream so we can restart the simulation
-    // and build up statistics. In eventmode we are running
-    // events, and there is no point in saving the state.
-    if (not ahandler.eventmode) {
-      ModelARndm->write(ahandler.outputfiletag);
-      write(ahandler.outputfiletag);
+    if (not data.ahandler.eventmode) {
+      write(data.ahandler.outputfiletag);
     }
     VecDestroy(&solution);
     DMDestroy(&domain);
   }
 
-  //! Reads in a stored initial condition from Derek's file.
-  //! This is a helper function for initialize
+  //! Loads a field snapshot from <fnamein>_save.h5 into `solution`.
   PetscErrorCode read(const std::string fnamein) {
     std::string fname = fnamein + "_save.h5";
 #ifndef MODELA_NO_HDF5
     PetscViewer initViewer;
-    PetscBool flg;
-    PetscErrorCode ierr = PetscTestFile(fname.c_str(), '\0', &flg);
-    if (!flg) {
-      throw(
-          std::string("Unable to open file in restart mode with filename = ") +
-          fname);
-    }
-    ierr = PetscViewerHDF5Open(PETSC_COMM_WORLD, fname.c_str(), FILE_MODE_READ,
-                               &initViewer);
+    PetscErrorCode ierr = PetscViewerHDF5Open(PETSC_COMM_WORLD, fname.c_str(),
+                                              FILE_MODE_READ, &initViewer);
     CHKERRQ(ierr);
     PetscViewerSetFromOptions(initViewer);
     PetscObjectSetName((PetscObject)solution, "o4fields");
     ierr = VecLoad(solution, initViewer);
     CHKERRQ(ierr);
     PetscViewerDestroy(&initViewer);
-    return ierr;
+    return 0;
 #else
-    throw("ModelA::read Unable to load from file without HDF5 support. \n");
+    PetscPrintf(
+        "ModelA::read Unable to read from a file wihtout HDF5 support\n");
     return 0;
 #endif
   }
 
-  //! Reads in a stored initial condition from Derek's file.
-  //! This is a helper function for initialize
+  //! Writes a snapshot of the current field to <fnamein>_save.h5
   PetscErrorCode write(const std::string fnamein) {
     std::string fname = fnamein + "_save.h5";
 #ifndef MODELA_NO_HDF5
@@ -441,16 +376,6 @@ public:
                             void *params = 0) {
 
     const auto &ahandler = data.ahandler;
-    if (ahandler.restart) {
-      try {
-        read(ahandler.outputfiletag);
-        return (0);
-      } catch (const std::string &error) {
-        std::cout << "Error in restart -- aborting!" << std::endl;
-        std::cout << error << std::endl;
-        std::abort();
-      }
-    }
 
     // Compute the lattice spacing
     PetscReal hx = data.hX();
@@ -556,44 +481,6 @@ public:
     return (0);
   }
 
-  PetscErrorCode initialize_gaussian_const() {
-    // This Get a pointer to do the calculation
-    PetscScalar ****u;
-    PetscCall(DMDAVecGetArrayDOF(domain, solution, &u));
-
-    // Get the Local Corner od the vector
-    PetscInt i, j, k, L, xstart, ystart, zstart, xdimension, ydimension,
-        zdimension;
-
-    PetscCall(DMDAGetCorners(domain, &xstart, &ystart, &zstart, &xdimension,
-                             &ydimension, &zdimension));
-
-    // We are going initialize the grid with the charges being gaussian random
-    // numbers. The charges are normalized so that the total charge is zero.
-    std::vector<PetscScalar> charge_sum_local(ModelAData::Ndof, 0.);
-    std::vector<PetscScalar> charge_sum(ModelAData::Ndof, 0.);
-
-    PetscScalar chi = data.acoefficients.chi;
-    for (k = zstart; k < zstart + zdimension; k++) {
-      for (j = ystart; j < ystart + ydimension; j++) {
-        for (i = xstart; i < xstart + xdimension; i++) {
-          for (L = 0; L < ModelAData::Ndof; L++) {
-            // Dont update the phi components
-            if (L < ModelAData::Nphi) {
-              continue;
-            }
-
-            u[k][j][i][L] = sqrt(chi) * 0.5;
-          }
-        }
-      }
-    }
-
-    PetscCall(DMDAVecRestoreArrayDOF(domain, solution, &u));
-
-    return (0);
-  }
-
   // Routine that initializes the fields randomly under the constraint phi^2 =
   // R, i.e. uniformly distributed spins on a 4d sphere
   //
@@ -672,117 +559,5 @@ public:
     return (0);
   }
 
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CAUTION
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!1!!!!!!!!!!!!!!!!! Cannot be run on multiple
-  // cores, this will crash because random domains are not multithread safe !!
-
-  // Routine that initializes the domains of size (L/4)**3 randomly. Fields are
-  // still constrained by phi^2 = R, i.e. uniformly distributed spins on a 4d
-  // sphere
-  //
-  // Use hyperspherical coordinates:
-  // s_0 = R * sin(phi) * sin(theta1) * sin(theta2)
-  // s_1 = R * cos(phi) * sin(theta1) * sin(theta2)
-  // s_2 = R * cos(theta1) * sin(theta2)
-  // s_3 = R * cos(theta2)
-  //
-  // Measure: sin(theta1) sin^2(theta2) dphi dtheta1 dtheta2
-  PetscErrorCode initialize_random_domains() {
-
-    constexpr auto PI = 3.14159265358979323846;
-
-    PetscMPIInt rank;
-    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-
-    // This Get a pointer to do the calculation
-    PetscScalar ****u;
-    PetscCall(DMDAVecGetArrayDOF(domain, solution, &u));
-
-    // Get global domain size
-    PetscInt Mx, My, Mz, i, j, k, bx, by, bz;
-    PetscCall(DMDAGetInfo(domain, nullptr, &Mx, &My, &Mz, nullptr, nullptr,
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          nullptr));
-
-    if (rank == 0) {
-
-      // domain settings
-      // Partition the global domain
-      PetscInt domain_partition = 4;
-      PetscInt domain_size_x = Mx / domain_partition;
-      PetscInt domain_size_y = My / domain_partition;
-      PetscInt domain_size_z = Mz / domain_partition;
-
-      PetscReal t = data.atime.t();
-      PetscReal R = sqrt(data.acoefficients.f2(t));
-      PetscReal phi;
-      PetscReal theta1;
-      PetscReal theta2;
-
-      // boolean and reals needed for rejection sampling
-      bool accepted;
-      PetscReal guess;
-      PetscReal reference;
-
-      // iterate over all domains
-      for (bx = 0; bx < domain_partition; bx++) {
-        for (by = 0; by < domain_partition; by++) {
-          for (bz = 0; bz < domain_partition; bz++) {
-
-            // get random uniform sample for phi's of this domain
-            phi = 2.0 * PI * ModelARndm->uniform();
-
-            accepted = false;
-
-            // loop for rejection sampling
-            // (needed to sample thetas according to sin(theta1) * sin^2(theta2)
-            // )
-            while (accepted == false) {
-              // get random uniform sample for thetas and guess
-              theta1 = PI * ModelARndm->uniform();
-              theta2 = PI * ModelARndm->uniform();
-              guess = ModelARndm->uniform();
-
-              // calculate reference value
-              reference =
-                  std::sin(theta1) * std::sin(theta2) * std::sin(theta2);
-
-              // accept if guess <= reference, otherwise reject (loop again)
-              if (guess <= reference)
-                accepted = true;
-            }
-
-            PetscInt kstart = domain_size_z * bz;
-            PetscInt kend = domain_size_z * (bz + 1);
-            PetscInt jstart = domain_size_y * by;
-            PetscInt jend = domain_size_y * (by + 1);
-            PetscInt istart = domain_size_x * bx;
-            PetscInt iend = domain_size_x * (bx + 1);
-
-            // iterate over all lattice sites of this domain and initialize
-            // fields to accepted angles careful: initialize u only inside local
-            // owned part
-            for (k = kstart; k < kend; k++) {
-              for (j = jstart; j < jend; j++) {
-                for (i = istart; i < iend; i++) {
-
-                  u[k][j][i][0] =
-                      R * std::sin(phi) * std::sin(theta1) * std::sin(theta2);
-                  u[k][j][i][1] =
-                      R * std::cos(phi) * std::sin(theta1) * std::sin(theta2);
-                  u[k][j][i][2] = R * std::cos(theta1) * std::sin(theta2);
-                  u[k][j][i][3] = R * std::cos(theta2);
-                }
-              }
-            }
-          }
-        }
-      }
-
-      PetscCall(DMDAVecRestoreArrayDOF(domain, solution, &u));
-    }
-
-    return (0);
-  }
 };
 #endif

@@ -16,79 +16,22 @@
 #include "measurer.h"
 #include "measurer_output.h"
 
-void thermalize_event(ModelA *const model) {
-  const auto &ahandler = model->data.ahandler;
-  auto &atime = model->data.atime;
-
-  // Thermalize the state in memory at the initial time ;
-  int nsteps = static_cast<int>(ahandler.thermalization_time / atime.dt());
-  PetscPrintf(PETSC_COMM_WORLD, "Thermalizing event %d\n",
-              ahandler.current_event);
-
-  // Thermalize the initialconditions
-  std::unique_ptr<EulerLangevinHB> thermalizer =
-      std::make_unique<EulerLangevinHB>(*model);
-  model->initialize_gaussian_charges();
-  for (int i = 0; i < nsteps; i++) {
-    const int substeps = 6;
-    for (int j = 0; j < substeps; j++) {
-      thermalizer->step(atime.dt() / substeps);
-    }
-    PetscPrintf(PETSC_COMM_WORLD,
-                "Thermalizing Event/Timestep %d/%d: step size = %g, time = %g, "
-                "nsteps to thermalize = %d, mass %e \n",
-                ahandler.current_event, i, (double)atime.dt(),
-                (double)atime.t(), nsteps, model->data.mass());
-  }
-  thermalizer->finalize();
-}
-
 void initialize_event(const int &ievent, ModelA *const model,
                       nlohmann::json &inputs) {
   const auto &ahandler = model->data.ahandler;
   std::string initialization = inputs["initialization"];
 
   if (initialization == "default") {
-    // Do a cold start and thermalize the event
+    // Do a cold start
     if (ievent == 0) {
       model->initialize();
     }
-    thermalize_event(model);
-  } else if (initialization == "restart") {
-    // Look for a previously saved initial condtitions
-    model->read(ahandler.outputfiletag);
-  } else if (initialization == "quench_mode") {
-    // Initialize a quench.  Set the initial temperature (mass parameter)
-    // according a given value and thermalize this initial condition.  Then,
-    // after the thremalization process reset the mass to the one used for the
-    // actual running (as opposed to initializing) the code. The reset process
-    // is handled below
-
-    auto &acoefficients = model->data.acoefficients;
-    const double mass0 =
-        acoefficients.mass0; // Store the mass for reset process
-    const double dmassdt =
-        acoefficients.dmassdt; // Store the slope for reset process
-
-    // Set the quench mass
-    acoefficients.mass0 = ahandler.quench_mode_mass0;
-    acoefficients.dmassdt = 0.;
-    PetscPrintf(PETSC_COMM_WORLD,
-                "Setting up a quench initial condition with initial mass %e\n",
-                acoefficients.mass0);
-
-    // Thermalize at the quench mass
-    if (ievent == 0) {
-      model->initialize();
-    }
-    thermalize_event(model);
-
-    // Reset the mass and teh slope
-    acoefficients.mass0 = mass0;
-    acoefficients.dmassdt = dmassdt;
-
-    PetscPrintf(PETSC_COMM_WORLD, "and final initial mass %e\n",
-                acoefficients.mass0);
+  } else if (initialization == "loadfile") {
+    // Load a standardized initial condition from an HDF5 snapshot. The
+    // "loadfile" input is the filename stem; the file itself is
+    // <loadfile>_save.h5 (same convention as ModelA::write()).
+    std::string fname = inputs["loadfile"].get<std::string>();
+    model->read(fname);
   } else if (initialization == "randomspins") {
     model->initialize_random_spins();
     model->initialize_gaussian_charges();
@@ -101,8 +44,8 @@ void initialize_event(const int &ievent, ModelA *const model,
   } else {
     throw std::runtime_error(
         "Unknown initialization type: " + initialization +
-        ". Please use one of the following: default, restart, quench_mode, "
-        "randomspins, gaussians, spinwaves.");
+        ". Please use one of the following: default, loadfile, randomspins, "
+        "gaussians, spinwaves.");
   }
 }
 
@@ -130,11 +73,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
   } else {
     filename = ahandler.outputfiletag + ".h5";
   }
-  // Set file access which is append if we are restarting
   PetscFileMode file_access = FILE_MODE_WRITE;
-  if (ahandler.restart) {
-    file_access = FILE_MODE_APPEND;
-  }
   // Open the file and create the measurement object
   Measurer measurer(model);
 
@@ -161,10 +100,9 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       }
       PetscPrintf(PETSC_COMM_WORLD,
                   "Event/Timestep %d/%d: step size = %g, time = %g, final = "
-                  "%g, mass = %e\n",
+                  "%g\n",
                   ahandler.current_event, steps, (double)atime.dt(),
-                  (double)atime.t(), (double)atime.tfinal(),
-                  model->data.mass());
+                  (double)atime.t(), (double)atime.tfinal());
       PetscLogEventEnd(measurements, 0, 0, 0, 0);
     }
 
@@ -200,48 +138,13 @@ void Run(nlohmann::json &inputs) {
   // Construct the stepper
   std::unique_ptr<Stepper> step;
   auto &etype = inputdata.ahandler.evolverType;
-  if (etype == "PV2HBSplit23") {
-    // Default is to include all steps
-    PetscPrintf(
-        PETSC_COMM_WORLD,
-        "Using the default stepper PV2HBSplit23 with steps ABBABBABBC\n");
-    step = std::make_unique<PV2HBSplit>(model, "ABBABBABBC", true, true, true);
-  } else if (etype == "PV2HBSplitGeneral") {
-    PetscPrintf(
-        PETSC_COMM_WORLD,
-        "Using the general stepper PV2HBSplit with steps from input file\n");
-    nlohmann::json general_stepper = inputs["pv2hb_split_general"];
-    std::string steps = general_stepper.value("steps", "ABBABBABBC");
-    const bool ideal = general_stepper.value("include_ideal", true);
-    const bool heatbath = general_stepper.value("include_heatbath", true);
-    const bool diffuse = general_stepper.value("include_diffuse", true);
-    step = std::make_unique<PV2HBSplit>(model, steps, ideal, heatbath, diffuse);
-  } else if (etype == "ModelGDiffusionStep") {
-    // Solves the diffusion equation
-    PetscPrintf(PETSC_COMM_WORLD, "Using the ModelGDiffusionStep stepper with "
-                                  "use_implicit step option\n");
-    bool use_implicit_step = inputs["ModelGDiffusionStep"]["use_implicit_step"];
-    if (use_implicit_step) {
-      PetscPrintf(PETSC_COMM_WORLD, "Using implicit step\n");
-      step = std::make_unique<ModelGDiffusionStep>(model, use_implicit_step);
-    } else {
-      PetscPrintf(PETSC_COMM_WORLD, "Using explicit step\n");
-      step = std::make_unique<ModelGExplicitDiffusionStep>(model);
-    }
-  } else if (etype == "SuperSplitStep") {
-    PetscPrintf(
-        PETSC_COMM_WORLD,
-        "Using the SuperSplitStep stepper with use_implicit_step option\n");
-    bool use_implicit_step =
-        inputs["SuperSplitStep"].value<bool>("use_implicit_step", false);
+  if (etype == "SuperSplitStep") {
     std::string step_sequence =
         inputs["SuperSplitStep"].value<std::string>("step_sequence", "AB");
-    PetscPrintf(
-        PETSC_COMM_WORLD,
-        "Using the SuperSplitStep stepper step_sequence %s \n", step_sequence.c_str());
-    step = std::make_unique<SuperSplitStep>(model, step_sequence,
-                                            use_implicit_step);
-    ;
+    PetscPrintf(PETSC_COMM_WORLD,
+                "Using the SuperSplitStep stepper step_sequence %s \n",
+                step_sequence.c_str());
+    step = std::make_unique<SuperSplitStep>(model, step_sequence);
   } else {
     PetscPrintf(PETSC_COMM_WORLD, "Unrecognized stepper type %s. Aborting...\n",
                 etype.c_str());

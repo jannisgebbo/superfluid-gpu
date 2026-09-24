@@ -5,3 +5,5 @@
 *.swp
 *.exe
 gitversion.h
+build/
+__pycache__/

@@ -21,55 +21,28 @@ data = {
     "deltat": 0.24,
 
     # Action of O4 mdoel parameters
-    "mass0": -4.70052,
-    "dmassdt": 0,
-    "lambda": 4.0,
     "H": 0.003,
     "chi": 5.0,
 
     # Transport Coefficients
     "gamma": 1.0,
     "diffusion": 0.3333333,
-    # evolverType: selects the time-evolution algorithm. Options:
-    #
-    #   "PV2HBSplit23"       -- Default. Predictor-Verlet + heat-bath split
-    #                           stepper, 2nd/3rd order, fixed sequence
-    #                           "ABBABBABBC". A = ideal (Verlet) substep,
-    #                           B = heat-bath substep, C = diffusion substep.
-    #
-    #   "PV2HBSplitGeneral"  -- Same stepper but with a user-defined step
-    #                           sequence and toggles for each substep type,
-    #                           controlled by the "pv2hb_split_general" block.
-    #
-    #   "SuperSplitStep"     -- Split stepper for the superfluid sector.
-    #                           Use with superfluidmode=True. Requires a
-    #                           "SuperSplitStep" block with keys
-    #                           "step_sequence" (str, default "AB") and
-    #                           "use_implicit_step" (bool, default false).
-    "evolverType": "PV2HBSplit23",
-    # Full control over the stepper. This is when evolverType is set to
-    # "PV2HBSplitGeneral"
-    "pv2hb_split_general": {
-        "steps": "ABBABBABBC",
-        "include_ideal": True,
-        "include_heatbath": True,
-        "include_diffusion": True,
+    # evolverType: the split stepper for the superfluid sector.
+    #   'A' = ideal (Verlet) substep, 'B' = explicit diffusion substep.
+    "evolverType": "SuperSplitStep",
+    "SuperSplitStep": {
+        "step_sequence": "AB",
     },
     "seed": 122335456,
-    "restart": False,
     "outputfiletag": "grun",
     "saveFrequency": 3,
-    "thermalization_time": 0.0,
-    # Options are [ "default", "restart", "quench_mode" ,  "randomspins"]
+    # Options are [ "default", "randomspins", "gaussians", "spinwaves" ]
     "initialization": "default",
-    # for quenched initial conditions
-    "quench_mode": False,
-    "quench_mode_mass0": -4.70052,
     # For running multi-events
     "eventmode": False,
     "nevents": 1,
     # parameters for superfluid events
-    "superfluidmode": False,
+    "superfluidmode": True,
     "f2_constant": 5.0,
 }
 
@@ -82,23 +55,14 @@ CheckInputs = True
 def checkinputs():
     if not CheckInputs:
         return
-    if data["mass0"] > 0:
-        raise SystemExit("The parameters mass0 should be negative")
-    if data["dmassdt"] > 0:
-        raise SystemExit("The parameters dmassdt should be negative")
     if data["chi"] != 5.0:
         raise SystemExit("Chi should be five")
-    if data["superfluidmode"]:
-        if data["f2_constant"] != 5.0:
-            raise SystemExit("f2 constant should be five")
-        if data["evolverType"] != "SuperSplitStep":
-            raise SystemExit('In superfluidmode evolverType must be "SuperSplitStep"')
-    else:
-        if data["evolverType"] not in ("PV2HBSplit23", "PV2HBSplitGeneral"):
-            raise SystemExit(
-                'evolverType must be "PV2HBSplit23" or "PV2HBSplitGeneral" '
-                "for non-superfluid runs"
-            )
+    if not data["superfluidmode"]:
+        raise SystemExit("This build only supports superfluidmode=True")
+    if data["f2_constant"] != 5.0:
+        raise SystemExit("f2 constant should be five")
+    if data["evolverType"] != "SuperSplitStep":
+        raise SystemExit('evolverType must be "SuperSplitStep"')
 
 
 # dump the data into a .json file
@@ -107,39 +71,11 @@ def datatojson():
         json.dump(data, outfile, indent=4)
 
 
-# Canonicalize the names for a given set of parameters
-
-
-def get_kzfilename(tag):
-    name = "%s_N%03d_m%08d_h%06d_tkz%06d" % (
-        tag,
-        data["NX"],
-        round(100000 * data["mass0"]),
-        round(1000000 * data["H"]),
-        round(1.0 / data["dmassdt"]),
-    )
-    return name
-
-
-# Canonicalize the names for a given set of parameters
-
-
-def get_qkzfilename(tag):
-    name = "%s_N%03d_m%08d_h%06d_q" % (
-        tag,
-        data["NX"],
-        round(100000 * data["mass0"]),
-        round(1000000 * data["H"]),
-    )
-    return name
-
-
 def getdefault_filename(tag):
     tag = data["outputfiletag"]
-    name = "%s_N%03d_m%08d_h%06d_c%05d" % (
+    name = "%s_N%03d_h%06d_c%05d" % (
         tag,
         data["NX"],
-        round(100000 * data["mass0"]),
         round(1000000 * data["H"]),
         round(100 * data["chi"]),
     )
