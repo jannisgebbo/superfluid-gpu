@@ -6,4 +6,5 @@
 *.exe
 gitversion.h
 build/
+build-gpu/
 __pycache__/

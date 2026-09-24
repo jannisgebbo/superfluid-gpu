@@ -32,3 +32,8 @@ target_link_libraries(modelg PUBLIC
 # Build SuperPions and link it to the core library
 add_executable(SuperPions.exe SuperPions.cxx)
 target_link_libraries(SuperPions.exe PRIVATE modelg)
+
+if(SFGPU_KOKKOS)
+    target_link_libraries(modelg PUBLIC Kokkos::kokkos)
+    target_compile_definitions(modelg PUBLIC SFGPU_KOKKOS)
+endif()

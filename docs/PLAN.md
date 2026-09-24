@@ -178,16 +178,22 @@ main → Run
 
 ## Next
 
-1. **Build PETSc+Kokkos+CUDA** spack env at
-   `$CFS/m3722/opt/prlm/petsc-gpu-int64` (`petsc +hdf5 +int64 +cuda +kokkos
-   +openmp cuda_arch=80`, plus `kokkos +cuda +openmp +wrapper +cuda_lambda`).
-   Targets CPE 26.03 (cray-mpich 9.1.0) with CUDA 12.9; `~/.spack/packages.yaml`
-   was moved to 26.03 (the 25.09 copy is in `packages.yaml.cpe2509.bak`).
-2. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` and
-   `ModelGExplicitDiffusionStep::step`. Design for fewer ghost exchanges per
-   step (see profile above).
-3. Measurement cost (6–8%) is not a concern. If needed, measure every 6–10
-   steps via `saveFrequency`.
+1. ~~Build PETSc+Kokkos+CUDA~~ **done (2026-09-24)**, from source, not spack:
+   PETSc 3.25.5 + Kokkos 5.1.0 + CUDA 13.2 at
+   `$CFS/m3722/opt/prlm/petsc-gpu-int64`. See
+   `platforms/perlmutter/Perlmutter.md`. `tests/kokkos_smoke.exe` (DMDA on
+   Kokkos vectors, device kernel, periodic ghost exchange) passes on 1 and 4
+   GPUs. Build with `cmake -B build-gpu -DSFGPU_KOKKOS=ON` after sourcing
+   `setupprlm-gpu.sh`. Multi-rank runs need `--gpu-bind=none`.
+2. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` (kick +
+   fused second drift, and the first drift) and
+   `ModelGExplicitDiffusionStep::step`. Every per-substep loop must be a
+   device kernel. Validate against the CPU code within a tolerance.
+3. Move the measurer's slice averages to Kokkos once host copies show up in
+   the GPU profile. Measurement cost (6–8% on CPU) is otherwise not a
+   concern; measure every 6–10 steps via `saveFrequency` if needed.
+4. GPU branch in `grunner.prlmrun` (`-C gpu`, `-A m3722_g`, 4 ranks,
+   `--gpu-bind=none`).
 
 Open: `NoiseGenerator` retention — revisit once we're confident nothing new
 needs an RNG. Missing `SuperSplitStep` JSON block throws in `Run`

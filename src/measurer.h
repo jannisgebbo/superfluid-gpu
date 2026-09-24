@@ -36,7 +36,7 @@ public:
     }
     fftw_execute(plan);
     for (size_t i = 0; i < out_ptr.size(); i++) {
-      out[i] = out_ptr[i] / in_ptr.size();
+      out[i] = out_ptr[i] / static_cast<double>(in_ptr.size());
     }
   }
 

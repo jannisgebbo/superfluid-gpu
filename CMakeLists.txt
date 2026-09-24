@@ -1,8 +1,9 @@
 # my_project/CMakeLists.txt
 cmake_minimum_required(VERSION 3.15)
-project(ModelG VERSION 1.0 LANGUAGES CXX)
 
-# Talk directly to the OS to get the compilers
+# Use PETSc's compilers. This must come before project(): after it, CMake has
+# already detected the system default c++ (GCC 7 on Perlmutter) and changing
+# CMAKE_CXX_COMPILER no longer changes what CMake thinks the compiler is.
 execute_process(
     COMMAND pkg-config --variable=ccompiler PETSc
     OUTPUT_VARIABLE PETSC_CC
@@ -24,8 +25,19 @@ if(PETSC_CC AND PETSC_CXX)
     message(STATUS "Shell override: Set CXX Compiler to ${CMAKE_CXX_COMPILER}")
 endif()
 
-# Enforce C++17 and optimization
-set(CMAKE_CXX_STANDARD 17)
+project(ModelG VERSION 1.0 LANGUAGES CXX)
+
+# GPU build: Kokkos kernels on PETSc Kokkos vectors. Needs a PETSc
+# configured with Kokkos (platforms/perlmutter/setupprlm-gpu.sh); build it in
+# its own directory, e.g. cmake -B build-gpu -DSFGPU_KOKKOS=ON
+option(SFGPU_KOKKOS "Build with Kokkos (GPU) support" OFF)
+
+# Enforce C++17 (C++20 for Kokkos 5) and optimization
+if(SFGPU_KOKKOS)
+    set(CMAKE_CXX_STANDARD 20)
+else()
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -39,6 +51,10 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PETSC REQUIRED PETSc)
 pkg_check_modules(HDF5 REQUIRED hdf5)
 pkg_check_modules(FFTW REQUIRED fftw3)
+if(SFGPU_KOKKOS)
+    find_package(Kokkos REQUIRED)
+    message(STATUS "Kokkos ${Kokkos_VERSION} devices: ${Kokkos_DEVICES}")
+endif()
 
 # Generate gitversion.h into the build directory
 execute_process(
@@ -57,3 +73,6 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Hand off the actual building to the src/ directory
 add_subdirectory(src)
+if(SFGPU_KOKKOS)
+    add_subdirectory(tests)
+endif()
