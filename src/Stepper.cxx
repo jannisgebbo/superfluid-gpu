@@ -23,11 +23,14 @@ IdealPV2::IdealPV2(ModelA &in)
 bool IdealPV2::step(const double &dt) { return step_no_reject(dt); }
 
 bool IdealPV2::step_no_reject(const double &dt) {
+  const auto &prof = Profiling::get();
 
   // drifts the solution by dt / 2.0
   G_node ***phinew;
   PetscCall(DMDAVecGetArray(da, model->solution, &phinew));
+  PetscLogEventBegin(prof.ideal_rotate, 0, 0, 0, 0);
   rotatePhi(phinew, dt / 2.0);
+  PetscLogEventEnd(prof.ideal_rotate, 0, 0, 0, 0);
   PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
 
   // Get a local vector with ghost cells
@@ -35,8 +38,7 @@ bool IdealPV2::step_no_reject(const double &dt) {
   PetscCall(DMGetLocalVector(da, &localU));
 
   // Fill in the ghost celss with mpicalls
-  PetscCall(DMGlobalToLocalBegin(da, model->solution, INSERT_VALUES, localU));
-  PetscCall(DMGlobalToLocalEnd(da, model->solution, INSERT_VALUES, localU));
+  PetscCall(ghost_exchange(da, model->solution, localU));
 
   // Get Access to arrays with drifted solution
   G_node ***phi;
@@ -56,6 +58,7 @@ bool IdealPV2::step_no_reject(const double &dt) {
   PetscInt s1, s2, epsilon;
 
   // Loop over central elements
+  PetscLogEventBegin(prof.ideal_kick, 0, 0, 0, 0);
   for (PetscInt k = zstart; k < zstart + zdimension; k++) {
     for (PetscInt j = ystart; j < ystart + ydimension; j++) {
       for (PetscInt i = xstart; i < xstart + xdimension; i++) {
@@ -125,8 +128,14 @@ bool IdealPV2::step_no_reject(const double &dt) {
     }
   }
 
+  PetscLogFlops(Profiling::ideal_kick_flops * xdimension * ydimension *
+                zdimension);
+  PetscLogEventEnd(prof.ideal_kick, 0, 0, 0, 0);
+
   // drifts dt / 2.0
+  PetscLogEventBegin(prof.ideal_rotate, 0, 0, 0, 0);
   rotatePhi(phinew, dt / 2.0);
+  PetscLogEventEnd(prof.ideal_rotate, 0, 0, 0, 0);
 
   PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
   PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
@@ -182,8 +191,7 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
   PetscCall(DMGetLocalVector(da, &localU));
 
   // Fill in the ghost celss with mpicalls
-  PetscCall(DMGlobalToLocalBegin(da, model->solution, INSERT_VALUES, localU));
-  PetscCall(DMGlobalToLocalEnd(da, model->solution, INSERT_VALUES, localU));
+  PetscCall(ghost_exchange(da, model->solution, localU));
 
   // Get Access to arrays with drifted solution
   G_node ***phi;
@@ -209,6 +217,8 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
                  &zdimension);
 
   // Loop over central elements
+  const auto &prof = Profiling::get();
+  PetscLogEventBegin(prof.diffusion_stencil, 0, 0, 0, 0);
   for (PetscInt k = zstart; k < zstart + zdimension; k++) {
     for (PetscInt j = ystart; j < ystart + ydimension; j++) {
       for (PetscInt i = xstart; i < xstart + xdimension; i++) {
@@ -259,6 +269,10 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
       }
     }
   }
+  PetscLogFlops(Profiling::diffusion_stencil_flops * xdimension * ydimension *
+                zdimension);
+  PetscLogEventEnd(prof.diffusion_stencil, 0, 0, 0, 0);
+
   PetscCall(DMDAVecRestoreArray(da, model->solution, &phinew));
   PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
   PetscCall(DMRestoreLocalVector(da, &localU));

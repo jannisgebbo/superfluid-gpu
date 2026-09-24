@@ -2,6 +2,7 @@
 #define STEPPER_H
 
 #include "ModelA.h"
+#include "Profiling.h"
 
 class Stepper {
 public:
@@ -65,20 +66,22 @@ public:
     }
   }
   bool step(const double &dt) override {
-    PetscLogEvent ideal_log, diffusive_log;
-    PetscLogEventRegister("ExplicitDiffusion", 0, &diffusive_log);
-    PetscLogEventRegister("IdealStep", 0, &ideal_log);
+    const auto &prof = Profiling::get();
 
     bool ok = true;
     for (char s : steps) {
       if (s == 'A') {
-        PetscLogEventBegin(ideal_log, 0, 0, 0, 0);
+        PetscLogStagePush(prof.ideal_stage);
+        PetscLogEventBegin(prof.ideal_step, 0, 0, 0, 0);
         ok = ok && pv2.step(dt / A_count);
-        PetscLogEventEnd(ideal_log, 0, 0, 0, 0);
+        PetscLogEventEnd(prof.ideal_step, 0, 0, 0, 0);
+        PetscLogStagePop();
       } else if (s == 'B') {
-        PetscLogEventBegin(diffusive_log, 0, 0, 0, 0);
+        PetscLogStagePush(prof.diffusion_stage);
+        PetscLogEventBegin(prof.diffusion_step, 0, 0, 0, 0);
         ok = ok && diffusion.step(dt / B_count);
-        PetscLogEventEnd(diffusive_log, 0, 0, 0, 0);
+        PetscLogEventEnd(prof.diffusion_step, 0, 0, 0, 0);
+        PetscLogStagePop();
       }
     }
     return ok;

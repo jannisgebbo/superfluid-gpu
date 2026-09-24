@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "ModelA.h"
+#include "Profiling.h"
 #include "Stepper.h"
 #include "gitversion.h"
 #include "initialize.h"
@@ -87,12 +88,24 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
         &measurer, filename, file_access);
   }
 
+  // With -profile_refcopy, time one VecCopy of the solution per step. It moves
+  // the same volume as the owned-block copy in DMGlobalToLocal, as a
+  // reference for the GhostExchange time.
+  const auto &prof = Profiling::get();
+  PetscBool refcopy = PETSC_FALSE;
+  PetscOptionsHasName(NULL, NULL, "-profile_refcopy", &refcopy);
+  Vec refvec = NULL;
+  if (refcopy) {
+    VecDuplicate(model->solution, &refvec);
+  }
+
   // Start the loop
   const double tiny = 1.e-10;
   while (atime.t() < atime.tfinal() - tiny) {
 
     // measure the solution every saveFrequency
     if (steps % ahandler.saveFrequency == 0) {
+      PetscLogStagePush(prof.measure_stage);
       PetscLogEventBegin(measurements, 0, 0, 0, 0);
       measurer.measure(&model->solution);
       if (rank == 0) {
@@ -104,6 +117,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
                   ahandler.current_event, steps, (double)atime.dt(),
                   (double)atime.t(), (double)atime.tfinal());
       PetscLogEventEnd(measurements, 0, 0, 0, 0);
+      PetscLogStagePop();
     }
 
     // Write the solution to tape if writeFrequency > 0. This is used for
@@ -122,10 +136,17 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
     step->step(atime.dt());
     PetscLogEventEnd(stepmonitor, 0, 0, 0, 0);
 
+    if (refcopy) {
+      PetscLogEventBegin(prof.ref_copy, 0, 0, 0, 0);
+      VecCopy(model->solution, refvec);
+      PetscLogEventEnd(prof.ref_copy, 0, 0, 0, 0);
+    }
+
     // Increment the clock
     steps++;
     atime += atime.dt();
   }
+  VecDestroy(&refvec);
 }
 
 void Run(nlohmann::json &inputs) {

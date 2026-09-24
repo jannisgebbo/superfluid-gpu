@@ -1,4 +1,5 @@
 #include "measurer.h"
+#include "Profiling.h"
 #include "nvector.h"
 #include <cstdio>
 #include <iomanip>
@@ -14,8 +15,7 @@ void Measurer::computeSliceAverage(Vec *solution) {
   Vec localU;
   DMGetLocalVector(da, &localU);
   // take the global vector U and distribute to the local vector localU
-  DMGlobalToLocalBegin(da, *solution, INSERT_VALUES, localU);
-  DMGlobalToLocalEnd(da, *solution, INSERT_VALUES, localU);
+  ghost_exchange(da, *solution, localU);
 
   // From the vector define the pointer for the field phi
   G_node ***fld;
@@ -165,8 +165,7 @@ void Measurer::computeSliceAveragePhase(Vec *solution) {
   Vec localU;
   DMGetLocalVector(da, &localU);
   // take the global vector U and distribute to the local vector localU
-  DMGlobalToLocalBegin(da, *solution, INSERT_VALUES, localU);
-  DMGlobalToLocalEnd(da, *solution, INSERT_VALUES, localU);
+  ghost_exchange(da, *solution, localU);
 
   // From the vector define the pointer for the field phi
   G_node ***fld;

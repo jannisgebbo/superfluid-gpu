@@ -43,6 +43,23 @@ Seed state: `SuperQuench@c137ab88`. The two repos are allowed to diverge.
   ideal step. Regression vs. SuperQuench is still bit-identical (`compare.py`
   treats `energy` as new-only).
 
+- Instrumented profile (NX=256, 128 ranks, job 58836344; `Profiling.h`
+  stages and events). The whole step is **memory-bandwidth bound**:
+  - A reference `VecCopy` of the solution takes 11.6 ms (about 230 GB/s for
+    the node). One `GhostExchange` takes about 18.5 ms, and `VecScatterBegin`
+    alone is about 13.6 ms. So roughly 2/3 of each exchange is the local copy
+    of the owned block; face packing (~3 ms) and MPI waiting (~5 ms) are the
+    rest.
+  - `DiffusionStencil` (14 ms/call), `IdealKick` (14 ms) and each
+    `IdealRotate` (11 ms) also run at about 250–300 GB/s node-wide; the flop
+    rates are low.
+  - Time split: B substeps 70% (exchange 59%, stencil 46% of B, overlapping
+    in the event nesting), A substeps 18% (exchange 3.7 s, rotate 4.4 s,
+    kick 2.7 s), measurements 7%.
+  - Levers, all about fewer full-grid memory sweeps: stop copying the owned
+    block every substep (ping-pong ghosted buffers, update only the ghosts),
+    fuse rotate+kick+rotate, and fuse B substeps.
+
 ## Superfluid-mode pathway (what we kept)
 
 Runtime selection: `superfluidmode = true` and
