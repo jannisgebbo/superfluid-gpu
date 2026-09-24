@@ -11,8 +11,8 @@ public:
 };
 
 /////////////////////////////////////////////////////////////////////////
-// Ideal Position Verlet Stepper. Energy is computed before and after the
-// step and exposed via getEnergy(), but the step is always accepted.
+// Ideal Position Verlet Stepper. The step is always accepted; the energy is
+// recorded by the Measurer, not here.
 class IdealPV2 : public Stepper {
 public:
   IdealPV2(ModelA &in);
@@ -20,12 +20,6 @@ public:
   bool step(const double &dt) override;
 
   ~IdealPV2() { ; }
-
-  PetscScalar computeEnergy(PetscScalar dt);
-  void getEnergy(PetscScalar &oldE, PetscScalar &newE) const {
-    oldE = oldEnergy;
-    newE = newEnergy;
-  }
 
 private:
   ModelA *model;
@@ -35,9 +29,6 @@ private:
 
   bool step_no_reject(const double &dt);
   void rotatePhi(G_node ***phinew, double dt);
-
-  PetscScalar oldEnergy;
-  PetscScalar newEnergy;
 
   // Minor optimization
   PetscInt xstart, ystart, zstart, xdimension, ydimension, zdimension;

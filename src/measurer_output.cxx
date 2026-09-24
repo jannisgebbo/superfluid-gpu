@@ -30,6 +30,7 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   scalars = std::make_unique<ntuple<1>>(NN1, "phi", file_id);
   NN1 = {1};
   timeout = std::make_unique<ntuple<1>>(NN1, "timeout", file_id);
+  energy = std::make_unique<ntuple<1>>(NN1, "energy", file_id);
 
   std::array<size_t, 2> NN2{Measurer::NObs,
                             static_cast<size_t>(measure->getN())};
@@ -69,6 +70,9 @@ void measurer_output_fasthdf5::save(const std::string &what) {
 
   timeout->row[0] = measure->getModel()->data.atime.t();
   timeout->fill();
+
+  energy->row[0] = measure->energy;
+  energy->fill();
 
   scalars->row = measure->OAverage;
   scalars->fill();

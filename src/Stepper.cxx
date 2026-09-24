@@ -12,8 +12,6 @@ IdealPV2::IdealPV2(ModelA &in)
   // Store for later use
   DMDAGetCorners(da, &xstart, &ystart, &zstart, &xdimension, &ydimension,
                  &zdimension);
-  oldEnergy = 0.;
-  newEnergy = 0.;
 }
 
 // Position-Verlet update for the ideal (advective) sector. Linearized about
@@ -22,12 +20,7 @@ IdealPV2::IdealPV2(ModelA &in)
 // Laplacian. Verlet is stable for omega_max * dt < 2, i.e. (for small m)
 //     v * dt < a / sqrt(3) ~ 0.577 a
 // We conventionally take v^2 = f^2 / chi = 1 and a = 1, so dt < 0.577.
-bool IdealPV2::step(const double &dt) {
-  oldEnergy = computeEnergy(dt);
-  bool success = step_no_reject(dt);
-  newEnergy = computeEnergy(dt);
-  return success;
-}
+bool IdealPV2::step(const double &dt) { return step_no_reject(dt); }
 
 bool IdealPV2::step_no_reject(const double &dt) {
 
@@ -166,71 +159,6 @@ void IdealPV2::rotatePhi(G_node ***phinew, double dt) {
       }
     }
   }
-}
-
-PetscScalar IdealPV2::computeEnergy(double dt) {
-  DM da = model->domain;
-  // Get a local vector with ghost cells
-  Vec localUNew;
-  DMGetLocalVector(da, &localUNew);
-
-  // Fill in the ghost celss with mpicalls
-
-  DMGlobalToLocalBegin(da, model->solution, INSERT_VALUES, localUNew);
-  DMGlobalToLocalEnd(da, model->solution, INSERT_VALUES, localUNew);
-
-  const auto &data = model->data;
-  const auto &coeff = data.acoefficients;
-
-  G_node ***phiNew;
-  DMDAVecGetArrayRead(da, localUNew, &phiNew);
-
-  const PetscReal H[4] = {coeff.H, 0., 0., 0.};
-
-  PetscInt xstart, ystart, zstart, xdimension, ydimension, zdimension;
-  DMDAGetCorners(da, &xstart, &ystart, &zstart, &xdimension, &ydimension,
-                 &zdimension);
-
-  // Loop over central elements
-  PetscScalar phimid = 0, grad2 = 0, nab2 = 0, hEn = 0;
-  PetscScalar localEnergy = 0;
-
-  for (PetscInt k = zstart; k < zstart + zdimension; k++) {
-    for (PetscInt j = ystart; j < ystart + ydimension; j++) {
-      for (PetscInt i = xstart; i < xstart + xdimension; i++) {
-        for (PetscInt s = 0; s < ModelAData::Nphi; ++s) {
-
-          phimid = phiNew[k][j][i].f[s];
-
-          grad2 += pow(phiNew[k + 1][j][i].f[s] - phimid, 2);
-          grad2 += pow(phiNew[k][j + 1][i].f[s] - phimid, 2);
-          grad2 += pow(phiNew[k][j][i + 1].f[s] - phimid, 2);
-
-          hEn += phimid * H[s];
-        }
-        for (PetscInt s = 0; s < ModelAData::NV; s++) {
-          nab2 += pow(phiNew[k][j][i].V[s], 2);
-        }
-
-        for (PetscInt s = 0; s < ModelAData::NA; s++) {
-          nab2 += pow(phiNew[k][j][i].A[s], 2);
-        }
-      }
-    }
-  }
-
-  localEnergy += 0.5 / coeff.chi * nab2;
-  localEnergy += 0.5 * grad2;
-  localEnergy -= hEn;
-
-  PetscScalar energy = 0;
-  MPI_Reduce(&localEnergy, &energy, 1, MPIU_SCALAR, MPI_SUM, 0,
-             PETSC_COMM_WORLD);
-
-  DMDAVecRestoreArrayRead(da, localUNew, &phiNew);
-  DMRestoreLocalVector(da, &localUNew);
-
-  return energy;
 }
 
 void IdealPV2::finalize() { ; }

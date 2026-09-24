@@ -83,6 +83,9 @@ void Measurer::computeSliceAverage(Vec *solution) {
     }
   }
 
+  // The energy needs the ghost cells filled above
+  computeEnergy(fld);
+
   // Retstore the array
   DMDAVecRestoreArrayRead(da, localU, &fld);
   DMRestoreLocalVector(da, &localU);
@@ -95,6 +98,48 @@ void Measurer::computeSliceAverage(Vec *solution) {
     MPI_Reduce(&wallLocalZ(l, 0), &wallZ(l, 0), N, MPIU_SCALAR, MPI_SUM, 0,
                PETSC_COMM_WORLD);
   }
+}
+
+// fld is a ghosted local array. The sum is reduced to rank 0 in energy.
+void Measurer::computeEnergy(G_node ***fld) {
+  DM &da = model->domain;
+  const auto &data = model->data;
+  const auto &coeff = data.acoefficients;
+  // Same effective field as IdealPV2::step_no_reject
+  PetscReal H[4] = {coeff.H, 0., 0., 0.};
+  if (data.ahandler.superfluidmode) {
+    H[0] *= coeff.sigmabyf(data.atime.t());
+  }
+
+  PetscInt ixs, iys, izs, nx, ny, nz;
+  DMDAGetCorners(da, &ixs, &iys, &izs, &nx, &ny, &nz);
+
+  PetscScalar phimid = 0, grad2 = 0, nab2 = 0, hEn = 0;
+  for (PetscInt k = izs; k < izs + nz; k++) {
+    for (PetscInt j = iys; j < iys + ny; j++) {
+      for (PetscInt i = ixs; i < ixs + nx; i++) {
+        for (PetscInt s = 0; s < ModelAData::Nphi; ++s) {
+          phimid = fld[k][j][i].f[s];
+
+          grad2 += pow(fld[k + 1][j][i].f[s] - phimid, 2);
+          grad2 += pow(fld[k][j + 1][i].f[s] - phimid, 2);
+          grad2 += pow(fld[k][j][i + 1].f[s] - phimid, 2);
+
+          hEn += phimid * H[s];
+        }
+        for (PetscInt s = 0; s < ModelAData::NV; s++) {
+          nab2 += pow(fld[k][j][i].V[s], 2);
+        }
+        for (PetscInt s = 0; s < ModelAData::NA; s++) {
+          nab2 += pow(fld[k][j][i].A[s], 2);
+        }
+      }
+    }
+  }
+
+  PetscScalar localEnergy = 0.5 / coeff.chi * nab2 + 0.5 * grad2 - hEn;
+  MPI_Reduce(&localEnergy, &energy, 1, MPIU_SCALAR, MPI_SUM, 0,
+             PETSC_COMM_WORLD);
 }
 
 // Helper function for slice averages works for double and complex types

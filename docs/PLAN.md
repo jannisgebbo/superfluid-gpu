@@ -26,6 +26,22 @@ Seed state: `SuperQuench@c137ab88`. The two repos are allowed to diverge.
   bit-identical between SuperQuench@c137ab88 and SuperfluidGPU@f98d9d6.
   Reference output: `squench_comparisons/baseline/baseline_sq/`. The random
   initial conditions are seeded per rank, so comparisons need equal rank counts.
+- CPU profile (`squench_comparisons/profile.py`, 1 node = 128 ranks,
+  `-log_view`): NX=256 takes 0.28 s/step, NX=512 takes 2.23 s/step. Both come to
+  about 2.1 µs per site per step per core. Ghost exchange (`VecScatterBegin` +
+  `End`) is 53–56% of the run. The exchange cost grows with volume (8× from 256
+  to 512), not with face area (4×). So the full owned-block copy inside
+  `DMGlobalToLocal` is probably what costs, not the MPI traffic. Fewer exchanges
+  per step is the lever. At the time there were about 9.7 per step: 1 for the A
+  step, 6 for the B steps, 2 for energy monitoring, and about 0.3 for
+  measurements.
+- Energy moved out of `IdealPV2` (it computed E before and after every A step
+  with 2 extra ghost exchanges, and nothing read it) into
+  `Measurer::computeEnergy`. That reuses the ghosted vector `computeSliceAverage`
+  already fills, so it costs no extra exchange. It is written as the `energy`
+  HDF5 dataset. H is the effective H·σ/f in superfluid mode, the same as the
+  ideal step. Regression vs. SuperQuench is still bit-identical (`compare.py`
+  treats `energy` as new-only).
 
 ## Superfluid-mode pathway (what we kept)
 
@@ -125,22 +141,22 @@ Kept per user directive:
 ```
 main → Run
         └── SuperSplitStep::step
-             ├── 'A' → IdealPV2::step             (deterministic; monitors energy)
+             ├── 'A' → IdealPV2::step             (deterministic)
              └── 'B' → ModelGExplicitDiffusionStep::step   (deterministic)
 ```
 
 ## Next
 
-1. **Regression baseline** — `compare.py` in `squench_comparisons/` checks
-   every HDF5 dataset between two runs. Baseline = NX=32 run of SuperQuench
-   vs. SuperfluidGPU launched through its own `grunner.prlmrun`.
-2. **Profile** the CPU code at NX=256/512 with `-log_view`: split between
-   `IdealStep`, `ExplicitDiffusion`, and ghost exchange.
-3. **Build PETSc+Kokkos+CUDA** spack env at
-   `$CFS/m3722/opt/prlm/petsc-gpu-int64` (`+cuda +kokkos +kokkos-kernels
-   +openmp +int64 +hdf5 cuda_arch=80`).
-4. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` and
-   `ModelGExplicitDiffusionStep::step`.
+1. **Build PETSc+Kokkos+CUDA** spack env at
+   `$CFS/m3722/opt/prlm/petsc-gpu-int64` (`petsc +hdf5 +int64 +cuda +kokkos
+   +openmp cuda_arch=80`, plus `kokkos +cuda +openmp +wrapper +cuda_lambda`).
+   Targets CPE 26.03 (cray-mpich 9.1.0) with CUDA 12.9; `~/.spack/packages.yaml`
+   was moved to 26.03 (the 25.09 copy is in `packages.yaml.cpe2509.bak`).
+2. **Kokkos port** of the two hot loops: `IdealPV2::step_no_reject` and
+   `ModelGExplicitDiffusionStep::step`. Design for fewer ghost exchanges per
+   step (see profile above).
+3. Measurement cost (6–8%) is not a concern. If needed, measure every 6–10
+   steps via `saveFrequency`.
 
 Open: `NoiseGenerator` retention — revisit once we're confident nothing new
 needs an RNG. Missing `SuperSplitStep` JSON block throws in `Run`

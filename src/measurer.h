@@ -95,6 +95,12 @@ public:
   static const PetscInt NScalars = NObs;
   std::vector<PetscScalar> OAverage;
 
+  // Total energy of the ideal (Hamiltonian) sector,
+  //   E = sum_x [ (A^2 + V^2) / (2 chi) + (grad phi)^2 / 2 - H phi_0 ],
+  // with forward differences for grad phi. In superfluid mode H is the
+  // effective field H * sigma/f used by the ideal step. Valid on rank 0 only.
+  PetscScalar energy = 0.;
+
   // First dimension is NObs, last is spatial index x=0...N
   nvector<PetscScalar, 2> wallX;
   nvector<PetscScalar, 2> wallY;
@@ -190,6 +196,7 @@ public:
 
 private:
   void computeSliceAverage(Vec *solution);
+  void computeEnergy(G_node ***fld);
   void computeSliceAveragePhase(Vec *solution);
   void computeDerivedObs();
 
