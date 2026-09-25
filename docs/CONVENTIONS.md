@@ -82,10 +82,20 @@ Per run in CFS:
   `eventmode=true`)
 
 **No `_save.h5` snapshots exist.** Initial conditions are generated fresh
-per run via `initialization = "randomspins"` with a random seed drawn at
+per run via `initialization = "randomspins"` (SuperQuench) with a random seed drawn at
 launch time. To reproduce a specific reference run, feed its exact `.json`
 to SuperfluidGPU — same seed + same RNG (both codebases use
 `xoroshiro128plus`) → same trajectory (up to MPI reduction order).
+
+**Initialization names differ from SuperQuench (2026-09-24).** In
+SuperfluidGPU, `"default"` is random spins with zero charges
+(`zero_charges()`), and `"randomspins"` was renamed
+`"randomspins-gaussiancharges"` (random spins plus gaussian charges with zero
+total, `initialize_gaussian_charges()`). SuperQuench's `"randomspins"` equals
+SuperfluidGPU's `"randomspins-gaussiancharges"`, so to reproduce a SuperQuench
+run, change that key in its `.json`. A `.json` that still says
+`"randomspins"` is rejected here, which is deliberate, so the charges never
+change silently.
 
 ## Old JSON compatibility
 

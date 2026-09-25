@@ -476,8 +476,39 @@ public:
     return (0);
   }
 
+  // Routine that sets the charge fields (A and V) to zero on every site,
+  // leaving phi unchanged
+  PetscErrorCode zero_charges() {
+    // This Get a pointer to do the calculation
+    PetscScalar ****u;
+    PetscCall(DMDAVecGetArrayDOF(domain, solution, &u));
+
+    // Get the Local Corner od the vector
+    PetscInt i, j, k, L, xstart, ystart, zstart, xdimension, ydimension,
+        zdimension;
+
+    PetscCall(DMDAGetCorners(domain, &xstart, &ystart, &zstart, &xdimension,
+                             &ydimension, &zdimension));
+
+    for (k = zstart; k < zstart + zdimension; k++) {
+      for (j = ystart; j < ystart + ydimension; j++) {
+        for (i = xstart; i < xstart + xdimension; i++) {
+          for (L = ModelAData::OffsetA; L < ModelAData::Ndof; L++) {
+            u[k][j][i][L] = 0.;
+          }
+        }
+      }
+    }
+
+    PetscCall(DMDAVecRestoreArrayDOF(domain, solution, &u));
+
+    return (0);
+  }
+
   // Routine that initializes the fields randomly under the constraint phi^2 =
-  // R, i.e. uniformly distributed spins on a 4d sphere
+  // R, i.e. uniformly distributed spins on a 4d sphere. Only phi is set; the
+  // charges (A and V) are not modified, so call initialize_gaussian_charges()
+  // or zero_charges() afterwards to set them.
   //
   // Use hyperspherical coordinates:
   // s_0 = R * sin(phi) * sin(theta1) * sin(theta2)

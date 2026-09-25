@@ -23,17 +23,18 @@ void initialize_event(const int &ievent, ModelA *const model,
   std::string initialization = inputs["initialization"];
 
   if (initialization == "default") {
-    // Do a cold start
-    if (ievent == 0) {
-      model->initialize();
-    }
+    // Random spins on the sphere with zero charges
+    model->initialize_random_spins();
+    model->zero_charges();
   } else if (initialization == "loadfile") {
     // Load a standardized initial condition from an HDF5 snapshot. The
     // "loadfile" input is the filename stem; the file itself is
     // <loadfile>_save.h5 (same convention as ModelA::write()).
     std::string fname = inputs["loadfile"].get<std::string>();
     model->read(fname);
-  } else if (initialization == "randomspins") {
+  } else if (initialization == "randomspins-gaussiancharges") {
+    // Random spins with gaussian charges of zero total, as in SuperQuench's
+    // "randomspins". Kept for the regression runs against SuperQuench.
     model->initialize_random_spins();
     model->initialize_gaussian_charges();
   } else if (initialization == "gaussians") {
@@ -45,8 +46,8 @@ void initialize_event(const int &ievent, ModelA *const model,
   } else {
     throw std::runtime_error(
         "Unknown initialization type: " + initialization +
-        ". Please use one of the following: default, loadfile, randomspins, "
-        "gaussians, spinwaves.");
+        ". Please use one of the following: default, loadfile, "
+        "randomspins-gaussiancharges, gaussians, spinwaves.");
   }
 }
 

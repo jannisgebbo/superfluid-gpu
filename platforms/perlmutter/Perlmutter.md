@@ -196,6 +196,8 @@ srun --jobid=<id> -n 4 --gpus-per-node=4 --gpu-bind=none \
   `cuIpcOpenMemHandle: invalid argument`. Kokkos then picks one GPU per rank
   (`--kokkos-map-device-id-by=mpi_rank`).
 - `MPICH_GPU_SUPPORT_ENABLED=1` is set by `setupprlm-gpu.sh`.
+- Production runs: `grunner.prlmrun(gpu=True, ...)` writes and submits a job
+  script with these settings (`nnodes` counts GPU nodes, 4 ranks each).
 - `tests/kokkos_smoke.exe` checks the whole toolchain: a DMDA on Kokkos
   vectors, a device kernel, and a periodic ghost exchange. It prints PASS
   and `vec=mpikokkos exec=Cuda`. It passed on 1 GPU and on 4 GPUs

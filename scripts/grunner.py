@@ -36,7 +36,10 @@ data = {
     "seed": 122335456,
     "outputfiletag": "grun",
     "saveFrequency": 3,
-    # Options are [ "default", "randomspins", "gaussians", "spinwaves" ]
+    # Options are [ "default", "randomspins-gaussiancharges", "loadfile",
+    # "gaussians", "spinwaves" ]. "default" draws random phi on the sphere
+    # with zero charges. "randomspins-gaussiancharges" adds gaussian charges
+    # of zero total (SuperQuench's "randomspins"; for regression runs).
     "initialization": "default",
     # For running multi-events
     "eventmode": False,
@@ -106,8 +109,31 @@ def prlmrun(
     nnodes=1,
     nodeid=False,
     interactive=False,
+    gpu=False,
 ):
-    prgm = find_program()
+    """Write (and unless dry_run, submit) a Perlmutter job script.
+
+    gpu=False: CPU nodes (account m3722), 128 ranks per node, host-loop
+    build from $MODELGEXEPATH.
+    gpu=True: GPU nodes (account m3722_g), 4 ranks per node, one A100 each,
+    Kokkos vectors. Uses $MODELGPATH/build-gpu and sources
+    setupprlm-gpu.sh inside the job, whatever environment was loaded at
+    submission.
+    """
+    if gpu:
+        modelgpath = os.environ.get("MODELGPATH")
+        if modelgpath is None:
+            print("Unable to find the path MODELGPATH")
+            sys.exit(1)
+        gpusetup = os.path.join(
+            modelgpath, "platforms", "perlmutter", "setupprlm-gpu.sh")
+        prgm = os.path.join(modelgpath, "build-gpu", "src", "SuperPions.exe")
+        if os.path.exists(prgm):
+            print("Found the executable {}".format(prgm))
+        else:
+            print("Unable to find the executable {}".format(prgm))
+    else:
+        prgm = find_program()
 
     # Create a run directory "name"  if does not exist, and cd to it
     dstack.pushd(data["outputfiletag"], mkdir=True)
@@ -142,39 +168,55 @@ def prlmrun(
 
     fh = open(filenamesh, "w")
 
-    tasks = int(nnodes * 128)
-    cpuspertask = int(2 * 128 / (tasks / nnodes))
+    if gpu:
+        # 4 A100s per GPU node, one rank per GPU; 64 cores = 128 hardware
+        # threads, and -c counts hardware threads
+        tasks = int(nnodes * 4)
+        cpuspertask = 32
+        account = "m3722_g"
+        constraint = "gpu"
+    else:
+        tasks = int(nnodes * 128)
+        cpuspertask = int(2 * 128 / (tasks / nnodes))
+        account = "m3722"
+        constraint = "cpu"
     print("#!/bin/bash", file=fh)
+    print("#SBATCH -A {}".format(account), file=fh)
+    print("#SBATCH -C {}".format(constraint), file=fh)
     if debug:
-        print("#SBATCH -A m3722", file=fh)
-        print("#SBATCH -C cpu", file=fh)
         print("#SBATCH --qos debug", file=fh)
         print("#SBATCH -t 00:30:00", file=fh)
-        print("#SBATCH -N {}".format(nnodes), file=fh)
-        print("#SBATCH --ntasks={}".format(tasks), file=fh)
-        print("#SBATCH --cpus-per-task={}".format(cpuspertask), file=fh)
     else:
-        print("#SBATCH -A m3722", file=fh)
-        print("#SBATCH -C cpu", file=fh)
         print("#SBATCH -q regular", file=fh)
         print("#SBATCH -t {}".format(int(math.ceil(time * 60.0))), file=fh)
-        print("#SBATCH -N {}".format(nnodes), file=fh)
-        print("#SBATCH --ntasks={}".format(tasks), file=fh)
-        print("#SBATCH --cpus-per-task={}".format(cpuspertask), file=fh)
+    print("#SBATCH -N {}".format(nnodes), file=fh)
+    print("#SBATCH --ntasks={}".format(tasks), file=fh)
+    print("#SBATCH --cpus-per-task={}".format(cpuspertask), file=fh)
+    if gpu:
+        print("#SBATCH --gpus-per-node=4", file=fh)
 
     # Set up the shell environment
     print("", file=fh)
+    if gpu:
+        print("source {}".format(gpusetup), file=fh)
     print("export HDF5_DISABLE_VERSION_CHECK=2", file=fh)
     print("", file=fh)
     print("#run the application:", file=fh)
     print('date  "+%%x %%T" > %s_time.out' % (data["outputfiletag"]), file=fh)
     # Write the command that actually runds the program
+    # On GPUs every rank must see all 4 GPUs (--gpu-bind=none): cray-mpich
+    # exchanges GPU buffers with CUDA IPC, which hangs with one GPU per rank.
+    # PETSc then gives each rank its own GPU.
+    gpuopts = "--gpus-per-node=4 --gpu-bind=none " if gpu else ""
     print(
-        "srun -n %d --cpu_bind=cores -c %d %s -input %s "
-        % (tasks, cpuspertask, prgm, data["outputfiletag"] + ".json"),
+        "srun -n %d --cpu_bind=cores -c %d %s%s -input %s "
+        % (tasks, cpuspertask, gpuopts, prgm,
+           data["outputfiletag"] + ".json"),
         end=" ",
         file=fh,
     )
+    if gpu:
+        print("-dm_vec_type kokkos", end=" ", file=fh)
     # This additional options are  added to the srun command
     for opt in moreopts:
         print(opt, end=" ", file=fh)

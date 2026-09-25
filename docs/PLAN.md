@@ -131,8 +131,9 @@ Kept per user directive:
 - `writeFrequency` snapshot output (barely used but useful for plotting).
 - `initialize_random_spins()`, `initialize_gaussian_charges()`.
 
-Remaining initialization branches: `default`, `randomspins`, `gaussians`,
-`spinwaves`.
+Remaining initialization branches: `default` (random spins, zero charges),
+`randomspins-gaussiancharges` (SuperQuench's `randomspins`), `loadfile`,
+`gaussians`, `spinwaves`.
 
 ## Phase 1 + 2 — done (`873e606`)
 
@@ -242,8 +243,13 @@ main → Run
    compute exactly the original algorithm.
    Later: replace `nvector` (host walls, FFT buffers) with Kokkos views or
    `Kokkos::mdspan`, once Kokkos is required in every build.
-4. GPU branch in `grunner.prlmrun` (`-C gpu`, `-A m3722_g`, 4 ranks,
-   `--gpu-bind=none`).
+4. ~~GPU branch in `grunner.prlmrun`~~ **done**: `prlmrun(gpu=True)` writes
+   a GPU job (`-A m3722_g`, `-C gpu`, 4 ranks and 4 GPUs per node,
+   `--gpu-bind=none`, `-dm_vec_type kokkos`). The job sources
+   `setupprlm-gpu.sh` and runs `$MODELGPATH/build-gpu/src/SuperPions.exe`,
+   whatever environment was loaded at submission. CPU scripts are unchanged.
+   Tested with NX=32 on the debug queue (job 58845409, 13 s,
+   `squench_comparisons/gpurunner/`).
 
 Open: `NoiseGenerator` retention — revisit once we're confident nothing new
 needs an RNG. Missing `SuperSplitStep` JSON block throws in `Run`
