@@ -21,22 +21,23 @@ void initialize_event(const int &ievent, ModelA *const model,
                       nlohmann::json &inputs) {
   const auto &ahandler = model->data.ahandler;
   std::string initialization = inputs["initialization"];
+  bool zero_charges = inputs.value("zero_charges", true);
 
-  if (initialization == "default") {
-    // Random spins on the sphere with zero charges
+  if (initialization == "default" or initialization == "randomspins") {
+    // Random spins on the sphere with zero or gaussian charges
     model->initialize_random_spins();
-    model->zero_charges();
+    if (zero_charges) {
+        model->zero_charges();
+    }
+    else {
+        model->initialize_gaussian_charges();
+    }
   } else if (initialization == "loadfile") {
     // Load a standardized initial condition from an HDF5 snapshot. The
     // "loadfile" input is the filename stem; the file itself is
     // <loadfile>_save.h5 (same convention as ModelA::write()).
     std::string fname = inputs["loadfile"].get<std::string>();
     model->read(fname);
-  } else if (initialization == "randomspins-gaussiancharges") {
-    // Random spins with gaussian charges of zero total, as in SuperQuench's
-    // "randomspins". Kept for the regression runs against SuperQuench.
-    model->initialize_random_spins();
-    model->initialize_gaussian_charges();
   } else if (initialization == "gaussians") {
     model->initialize(initialize_gaussians, &inputs["gaussians"]);
     model->write(inputs["outputfiletag"].get<std::string>() + "_initial");
@@ -117,6 +118,19 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
                   "%g\n",
                   ahandler.current_event, steps, (double)atime.dt(),
                   (double)atime.t(), (double)atime.tfinal());
+      PetscLogEventEnd(measurements, 0, 0, 0, 0);
+      PetscLogStagePop();
+    }
+
+    // on separate frequency: measure the topological charge Fourier readout
+    if (ahandler.saveFrequencyTopcharge > 0 and
+        steps % ahandler.saveFrequencyTopcharge == 0) {
+      PetscLogStagePush(prof.measure_stage);
+      PetscLogEventBegin(measurements, 0, 0, 0, 0);
+      measurer.measure_topcharge(&model->solution);
+      if (rank == 0) {
+        measurer_output->save_topcharge();
+      }
       PetscLogEventEnd(measurements, 0, 0, 0, 0);
       PetscLogStagePop();
     }
@@ -219,8 +233,8 @@ int main(int argc, char **argv) {
 
   int rank = 0;
   MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-  if (rank ==0) {
-     std::cout << "Input parameters:\n" << inputs.dump(2) << std::endl;
+  if (rank == 0) {
+    std::cout << "Input parameters:\n" << inputs.dump(2) << std::endl;
   }
 
   Run(inputs);

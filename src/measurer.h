@@ -8,6 +8,9 @@
 #include <fftw3.h>
 #include <memory>
 #include <vector>
+#ifdef SFGPU_CUFFT
+#include <cufft.h>
+#endif
 
 ////////////////////////////////////////////////////////////////////////
 // Class to compute the fourier transform of the 1d array. The fourier transform
@@ -44,6 +47,112 @@ public:
   void execute(nvector<double, 2> &in, nvector<std::complex<double>, 2> &out) {
     for (size_t i = 0; i < in.N[0]; i++) {
       execute_row(&in(i, 0), &out(i, 0));
+    }
+  }
+};
+
+////////////////////////////////////////////////////////////////////////
+// Class to compute a real-to-complex 3D fourier transform of a scalar field
+// on a periodic box.  Normalization convention (same as measurer_fft, in 3D):
+//
+//   W(k) = (1 / (n0*n1*n2)) \sum_x e^{-i k.x} W(x)
+//
+// The dimensions are (n0, n1, n2) in row-major (C) order, so that the last
+// index n2 is contiguous in memory.  The real input has size n0*n1*n2 and the
+// complex output (r2c half spectrum) has size n0*n1*(n2/2+1).
+//
+// When built with SFGPU_CUFFT (Kokkos + CUDA), the FFT runs on the GPU via
+// cuFFT and is typically 10-30x faster than single-rank FFTW for large grids.
+// The FFTW path is kept as fallback for CPU-only builds.
+class measurer_fft_3d {
+
+private:
+  size_t n0, n1, n2;
+  size_t out_size;
+#ifdef SFGPU_CUFFT
+  cufftHandle cufft_plan;
+  double *d_in = nullptr;
+  cufftDoubleComplex *d_out = nullptr;
+  bool use_cufft = true;
+#endif
+  // FFTW fallback (always available)
+  std::vector<double> in_ptr;
+  std::vector<std::complex<double>> out_ptr;
+  fftw_plan fftw_plan_handle;
+
+public:
+  measurer_fft_3d(const size_t N0, const size_t N1, const size_t N2)
+      : n0(N0), n1(N1), n2(N2),
+        out_size(N0 * N1 * (N2 / 2 + 1)),
+        in_ptr(N0 * N1 * N2, 0.),
+        out_ptr(N0 * N1 * (N2 / 2 + 1), 0.) {
+    // Always create the FFTW plan (cheap, and needed for non-CUDA builds)
+    fftw_plan_handle = fftw_plan_dft_r2c_3d(
+        static_cast<int>(N0), static_cast<int>(N1), static_cast<int>(N2),
+        in_ptr.data(), reinterpret_cast<fftw_complex *>(out_ptr.data()),
+        FFTW_MEASURE);
+#ifdef SFGPU_CUFFT
+    // Create the cuFFT plan and allocate device buffers
+    if (cufftPlan3d(&cufft_plan, static_cast<int>(N0), static_cast<int>(N1),
+                    static_cast<int>(N2), CUFFT_D2Z) != CUFFT_SUCCESS) {
+      use_cufft = false;
+    } else {
+      cudaMalloc(&d_in, N0 * N1 * N2 * sizeof(double));
+      cudaMalloc(&d_out, out_size * sizeof(cufftDoubleComplex));
+      if (!d_in || !d_out) {
+        // Allocation failed, fall back to FFTW
+        if (d_in) cudaFree(d_in);
+        if (d_out) cudaFree(d_out);
+        d_in = nullptr;
+        d_out = nullptr;
+        cufftDestroy(cufft_plan);
+        use_cufft = false;
+      }
+    }
+#endif
+  }
+
+  ~measurer_fft_3d() {
+    fftw_destroy_plan(fftw_plan_handle);
+#ifdef SFGPU_CUFFT
+    if (use_cufft) {
+      cufftDestroy(cufft_plan);
+      cudaFree(d_in);
+      cudaFree(d_out);
+    }
+#endif
+  }
+
+  // Transform the real volume `in` (size n0*n1*n2) into the complex half
+  // spectrum `out` (size n0*n1*(n2/2+1)), applying the 1/(n0*n1*n2) norm.
+  void execute(const std::vector<double> &in,
+               std::vector<std::complex<double>> &out) {
+    const double norm = static_cast<double>(n0 * n1 * n2);
+#ifdef SFGPU_CUFFT
+    if (use_cufft) {
+      const size_t in_size = n0 * n1 * n2;
+      // Host -> device
+      cudaMemcpy(d_in, in.data(), in_size * sizeof(double),
+                 cudaMemcpyHostToDevice);
+      // Execute R2C transform on GPU
+      cufftExecD2Z(cufft_plan, d_in, d_out);
+      cudaDeviceSynchronize();
+      // Device -> host (cufftDoubleComplex is layout-compatible with
+      // std::complex<double>)
+      cudaMemcpy(out.data(), d_out, out_size * sizeof(std::complex<double>),
+                 cudaMemcpyDeviceToHost);
+      // Normalize
+      for (size_t i = 0; i < out_size; i++) {
+        out[i] /= norm;
+      }
+      return;
+    }
+#endif
+    // FFTW fallback
+    std::copy(in.begin(), in.end(), in_ptr.begin());
+    fftw_execute(fftw_plan_handle);
+    for (size_t i = 0; i < out_ptr.size(); i++) {
+      out[i] = out_ptr[i] / norm;
     }
   }
 };
@@ -100,6 +209,15 @@ public:
   // with forward differences for grad phi. In superfluid mode H is the
   // effective field H * sigma/f used by the ideal step. Valid on rank 0 only.
   PetscScalar energy = 0.;
+
+  // Spherically-averaged Fourier readout of the topological charge density
+  // q(x) of the O(4) field (see computeTopChargeFourier in measurer.cxx).
+  int NtopchargeBins = 0;
+  double topcharge_dk = 0.;             // radial bin width = 2*pi/L
+  std::vector<double> topcharge_Sk;     // S(k) = <|qtilde|^2> per radial shell
+  std::vector<double> topcharge_kbins;  // |k| bin centers, = m*dk
+  std::vector<double> topcharge_Nshell; // number of modes per shell
+  std::complex<double> topcharge_zero{0., 0.}; // qtilde(k=0), DC component
 
   // First dimension is NObs, last is spatial index x=0...N
   nvector<PetscScalar, 2> wallX;
@@ -170,6 +288,25 @@ public:
     wallXPhase_k.resize(NObsPhase, N / 2 + 1);
     wallYPhase_k.resize(NObsPhase, N / 2 + 1);
     wallZPhase_k.resize(NObsPhase, N / 2 + 1);
+
+    // Set up the radial binning for the spherically averaged topological
+    // charge spectrum.  The bin width is the reciprocal-lattice spacing
+    // dk = 2*pi/L (LX == LY == LZ here since NX == NY == NZ).  The largest
+    // possible |k| integer magnitude is sqrt(3)*(N/2), so we need
+    // floor(sqrt(3)*N/2 + 0.5)+1 bins with center |k|_m = m*dk.
+    topcharge_dk = 2.0 * M_PI / model->data.LX;
+    const double rmax = sqrt(3.0) * (0.5 * static_cast<double>(N));
+    NtopchargeBins = static_cast<int>(floor(rmax + 0.5)) + 1;
+    topcharge_Sk.assign(NtopchargeBins, 0.);
+    topcharge_kbins.assign(NtopchargeBins, 0.);
+    topcharge_Nshell.assign(NtopchargeBins, 0.);
+    for (int m = 0; m < NtopchargeBins; m++) {
+      topcharge_kbins[m] = m * topcharge_dk;
+    }
+    // Only rank 0 assembles the full q(x) volume and takes its 3D FFT.
+    if (rank == 0) {
+      fftw3d = std::make_unique<measurer_fft_3d>(N, N, N);
+    }
   }
 
   virtual ~Measurer() {}
@@ -190,8 +327,18 @@ public:
     }
   }
 
+  // Computes the topological charge density q(x), its 3D FFT and the
+  // spherically averaged power spectrum S(k) together with the zero mode.
+  // computeTopChargeFourier is collective (it reduces q(x) to rank 0) so this
+  // must be called on all ranks; the FFT/binning happens internally on rank 0.
+  void measure_topcharge(Vec *solution) {
+    computeTopChargeFourier(solution);
+  }
+
   ModelA *getModel() { return model; }
   PetscInt getN() { return N; }
+  int getNTopchargeBins() { return NtopchargeBins; }
+  double getTopchargeDk() { return topcharge_dk; }
 
 private:
   // Slice averages, phase slice averages and energy: on the device if the
@@ -201,12 +348,15 @@ private:
   void computeEnergy(G_node ***fld);
   void computeSliceAveragePhase(Vec *solution);
   void computeDerivedObs();
+  void computeTopChargeFourier(Vec *solution);
 
   ModelA *model;
   PetscInt N;
 
   // FFT engine using the fftw3 library
   std::unique_ptr<measurer_fft> fftw;
+  // 3D FFT engine for the topological charge density (rank 0 only)
+  std::unique_ptr<measurer_fft_3d> fftw3d;
 };
 
 #endif

@@ -62,6 +62,17 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   wallx_phase_k = std::make_unique<ntuple<3>>(NN3, "wallx_phase_k", file_id);
   wally_phase_k = std::make_unique<ntuple<3>>(NN3, "wally_phase_k", file_id);
   wallz_phase_k = std::make_unique<ntuple<3>>(NN3, "wallz_phase_k", file_id);
+
+  // Topological charge spherically-averaged Fourier readout.
+  const size_t nbins = static_cast<size_t>(measure->getNTopchargeBins());
+  NN1 = {nbins};
+  topcharge_sk = std::make_unique<ntuple<1>>(NN1, "topcharge_Sk", file_id);
+  topcharge_kbins = std::make_unique<ntuple<1>>(NN1, "topcharge_kbins", file_id);
+  topcharge_nshell =
+      std::make_unique<ntuple<1>>(NN1, "topcharge_Nshell", file_id);
+  NN1 = {2};
+  topcharge_zero =
+      std::make_unique<ntuple<1>>(NN1, "topcharge_zeromode", file_id);
 }
 
 measurer_output_fasthdf5::~measurer_output_fasthdf5() { H5Fclose(file_id); }
@@ -71,8 +82,10 @@ void measurer_output_fasthdf5::save(const std::string &what) {
   timeout->row[0] = measure->getModel()->data.atime.t();
   timeout->fill();
 
-  energy->row[0] = measure->energy;
-  energy->fill();
+  if (measure->getModel()->data.ahandler.compute_energy) {
+    energy->row[0] = measure->energy;
+    energy->fill();
+  }
 
   scalars->row = measure->OAverage;
   scalars->fill();
@@ -127,6 +140,24 @@ void measurer_output_fasthdf5::save(const std::string &what) {
   wallx_phase_k->fill();
   wally_phase_k->fill();
   wallz_phase_k->fill();
+}
+
+void measurer_output_fasthdf5::save_topcharge(const std::string &what) {
+
+  // Topological charge spherically-averaged Fourier readout.  The bin centers
+  // and per-shell mode counts are time independent, so write them only once.
+  if (!topcharge_static_written) {
+    topcharge_kbins->row = measure->topcharge_kbins;
+    topcharge_kbins->fill();
+    topcharge_nshell->row = measure->topcharge_Nshell;
+    topcharge_nshell->fill();
+    topcharge_static_written = true;
+  }
+  topcharge_sk->row = measure->topcharge_Sk;
+  topcharge_sk->fill();
+  topcharge_zero->row[0] = measure->topcharge_zero.real();
+  topcharge_zero->row[1] = measure->topcharge_zero.imag();
+  topcharge_zero->fill();
 }
 #endif
 

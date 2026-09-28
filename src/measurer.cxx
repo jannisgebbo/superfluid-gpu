@@ -1,6 +1,7 @@
 // First: PETSc requires its Kokkos headers before any other PETSc header
 #include "KokkosTypes.h"
 #include "measurer.h"
+#include "O4AlgebraHelper.h"
 #include "Profiling.h"
 #include "nvector.h"
 #include <cstdio>
@@ -86,7 +87,9 @@ void Measurer::computeSliceAverage(Vec *solution) {
   }
 
   // The energy needs the ghost cells filled above
-  computeEnergy(fld);
+  if (model->data.ahandler.compute_energy) {
+    computeEnergy(fld);
+  }
 
   // Retstore the array
   DMDAVecRestoreArrayRead(da, localU, &fld);
@@ -445,15 +448,23 @@ void Measurer::computeSliceAverages(Vec *solution) {
       }
     }
 
-    // Energy, same terms as computeEnergy
+    // Energy (optional)
     const auto &data = model->data;
     const auto &coeff = data.acoefficients;
-    const PetscReal H0 = coeff.H * coeff.sigmabyf(data.atime.t());
-    PetscScalar grad2 = 0, nab2 = 0, hEn = 0;
-    energy_terms(u, xs, ys, zs, xm, ym, zm, H0, grad2, nab2, hEn);
-
-    DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u);
-    DMRestoreLocalVector(da, &localU);
+    if (data.ahandler.compute_energy) {
+      const PetscReal H0 = coeff.H * coeff.sigmabyf(data.atime.t());
+      PetscScalar grad2 = 0, nab2 = 0, hEn = 0;
+      energy_terms(u, xs, ys, zs, xm, ym, zm, H0, grad2, nab2, hEn);
+      // Reduce after releasing the view below
+      DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u);
+      DMRestoreLocalVector(da, &localU);
+      PetscScalar localEnergy = 0.5 / coeff.chi * nab2 + 0.5 * grad2 - hEn;
+      MPI_Reduce(&localEnergy, &energy, 1, MPIU_SCALAR, MPI_SUM, 0,
+                 PETSC_COMM_WORLD);
+    } else {
+      DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u);
+      DMRestoreLocalVector(da, &localU);
+    }
 
     std::fill(wallX.v.begin(), wallX.v.end(), 0.);
     std::fill(wallY.v.begin(), wallY.v.end(), 0.);
@@ -467,15 +478,266 @@ void Measurer::computeSliceAverages(Vec *solution) {
     reduce_walls(wallPhaseLocal[0], wallXPhase, NObsPhase, N);
     reduce_walls(wallPhaseLocal[1], wallYPhase, NObsPhase, N);
     reduce_walls(wallPhaseLocal[2], wallZPhase, NObsPhase, N);
-
-    PetscScalar localEnergy = 0.5 / coeff.chi * nab2 + 0.5 * grad2 - hEn;
-    MPI_Reduce(&localEnergy, &energy, 1, MPIU_SCALAR, MPI_SUM, 0,
-               PETSC_COMM_WORLD);
     return;
   }
 #endif
   computeSliceAverage(solution);
   computeSliceAveragePhase(solution);
+}
+
+////////////////////////////////////////////////////////////////////////
+// Topological charge density computation
+//
+// q(x) = 1/(12 pi^2) eps^{abcd} phi_a (dx phi_b)(dy phi_c)(dz phi_d)
+//       = 1/(12 pi^2) det[ phi , dx phi , dy phi , dz phi ]
+//
+// with centered finite differences d_i phi = (phi(x+e_i) - phi(x-e_i))/(2 h_i)
+
+// Determinant of a 4x4 matrix whose rows are (r0, r1, r2, r3).
+// This equals the fully-antisymmetric contraction
+//   eps^{abcd} r0_a r1_b r2_c r3_d   with eps^{0123} = +1.
+#ifdef SFGPU_KOKKOS
+O4_FUNCTION
+#else
+static inline
+#endif
+double det4x4(const double r0[4], const double r1[4],
+              const double r2[4], const double r3[4]) {
+  // 3x3 minor of rows (r1, r2, r3) over columns (c0, c1, c2).
+  // Written out explicitly (no lambda) so it compiles on CUDA devices.
+  const double m123 = r1[1] * (r2[2] * r3[3] - r2[3] * r3[2]) -
+                      r1[2] * (r2[1] * r3[3] - r2[3] * r3[1]) +
+                      r1[3] * (r2[1] * r3[2] - r2[2] * r3[1]);
+  const double m023 = r1[0] * (r2[2] * r3[3] - r2[3] * r3[2]) -
+                      r1[2] * (r2[0] * r3[3] - r2[3] * r3[0]) +
+                      r1[3] * (r2[0] * r3[2] - r2[2] * r3[0]);
+  const double m013 = r1[0] * (r2[1] * r3[3] - r2[3] * r3[1]) -
+                      r1[1] * (r2[0] * r3[3] - r2[3] * r3[0]) +
+                      r1[3] * (r2[0] * r3[1] - r2[1] * r3[0]);
+  const double m012 = r1[0] * (r2[1] * r3[2] - r2[2] * r3[1]) -
+                      r1[1] * (r2[0] * r3[2] - r2[2] * r3[0]) +
+                      r1[2] * (r2[0] * r3[1] - r2[1] * r3[0]);
+  return r0[0] * m123 - r0[1] * m023 + r0[2] * m013 - r0[3] * m012;
+}
+
+#ifdef SFGPU_KOKKOS
+// GPU kernel: compute q(x) at each owned site and write into a device buffer
+// indexed in natural (lexicographic) order: idx = i + N*j + N*N*k.
+// Sites not owned by this rank stay zero so MPI_Reduce(SUM) assembles all.
+static PetscErrorCode topcharge_kernel_kokkos(
+    DM da, Vec localU, PetscInt N, double prefac,
+    double inv2hx, double inv2hy, double inv2hz,
+    Kokkos::View<double *> &qdev) {
+  PetscFunctionBeginUser;
+  PetscInt xs, ys, zs, xm, ym, zm;
+  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+
+  ConstNodeView u;
+  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, localU, &u));
+
+  const PetscInt Nlat = N;
+  Kokkos::parallel_for(
+      "TopChargeDensity",
+      SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
+      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+        constexpr int Nphi = ModelAData::Nphi;
+        double phi[Nphi], Dx[Nphi], Dy[Nphi], Dz[Nphi];
+        for (int a = 0; a < Nphi; a++) {
+          phi[a] = u(k, j, i, a);
+          Dx[a] = (u(k, j, i + 1, a) - u(k, j, i - 1, a)) * inv2hx;
+          Dy[a] = (u(k, j + 1, i, a) - u(k, j - 1, i, a)) * inv2hy;
+          Dz[a] = (u(k + 1, j, i, a) - u(k - 1, j, i, a)) * inv2hz;
+        }
+        const double q = prefac * det4x4(phi, Dx, Dy, Dz);
+        const size_t idx = static_cast<size_t>(i) +
+                           static_cast<size_t>(Nlat) * j +
+                           static_cast<size_t>(Nlat) * Nlat * k;
+        qdev(idx) = q;
+      });
+  Kokkos::fence();
+
+  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+#endif
+
+void Measurer::computeTopChargeFourier(Vec *solution) {
+  DM &da = model->domain;
+  Vec localU;
+  DMGetLocalVector(da, &localU);
+  ghost_exchange(da, *solution, localU);
+
+  const auto &data = model->data;
+  const double hx = data.hX();
+  const double hy = data.hY();
+  const double hz = data.hZ();
+  const double prefac = 1.0 / (12.0 * M_PI * M_PI);
+
+  PetscInt ixs, iys, izs, nx, ny, nz;
+  DMDAGetCorners(da, &ixs, &iys, &izs, &nx, &ny, &nz);
+
+  const size_t Ntot = static_cast<size_t>(N) * N * N;
+  std::vector<double> qlocal(Ntot, 0.0);
+
+#ifdef SFGPU_KOKKOS
+  if (is_kokkos_vec(*solution)) {
+    // GPU path: compute q(x) on device, copy to host
+    Kokkos::View<double *> qdev("topcharge_q", Ntot);
+    Kokkos::deep_copy(qdev, 0.0);
+    topcharge_kernel_kokkos(da, localU, N, prefac,
+                            1.0 / (2.0 * hx), 1.0 / (2.0 * hy),
+                            1.0 / (2.0 * hz), qdev);
+    auto qhost = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), qdev);
+    std::memcpy(qlocal.data(), qhost.data(), Ntot * sizeof(double));
+  } else
+#endif
+  {
+    // Host path
+    G_node ***fld;
+    DMDAVecGetArrayRead(da, localU, &fld);
+
+    for (int k = izs; k < izs + nz; k++) {
+      for (int j = iys; j < iys + ny; j++) {
+        for (int i = ixs; i < ixs + nx; i++) {
+          double phi[ModelAData::Nphi], Dx[ModelAData::Nphi],
+              Dy[ModelAData::Nphi], Dz[ModelAData::Nphi];
+          for (int a = 0; a < ModelAData::Nphi; a++) {
+            phi[a] = fld[k][j][i].f[a];
+            Dx[a] = (fld[k][j][i + 1].f[a] - fld[k][j][i - 1].f[a]) / (2.0 * hx);
+            Dy[a] = (fld[k][j + 1][i].f[a] - fld[k][j - 1][i].f[a]) / (2.0 * hy);
+            Dz[a] = (fld[k + 1][j][i].f[a] - fld[k - 1][j][i].f[a]) / (2.0 * hz);
+          }
+          const double q = prefac * det4x4(phi, Dx, Dy, Dz);
+          const size_t idx = static_cast<size_t>(i) +
+                             static_cast<size_t>(N) * j +
+                             static_cast<size_t>(N) * N * k;
+          qlocal[idx] = q;
+        }
+      }
+    }
+
+    DMDAVecRestoreArrayRead(da, localU, &fld);
+  }
+
+  DMRestoreLocalVector(da, &localU);
+
+  // Assemble the full q(x) volume on rank 0.
+  int rank = -1;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  std::vector<double> qfull;
+  if (rank == 0) {
+    qfull.assign(Ntot, 0.0);
+  }
+  MPI_Reduce(qlocal.data(), rank == 0 ? qfull.data() : nullptr,
+             static_cast<int>(Ntot), MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
+
+  if (rank != 0) {
+    return;
+  }
+
+  // 3D FFT.  The FFTW/cuFFT dimensions are (n0,n1,n2) = (NZ,NY,NX) so that
+  // the x direction is the contiguous (last) index, matching the natural
+  // ordering idx = i + N*j + N*N*k used to fill qfull above.
+  const size_t nxh = static_cast<size_t>(N / 2 + 1);
+  std::vector<std::complex<double>> qtilde(static_cast<size_t>(N) * N * nxh);
+  fftw3d->execute(qfull, qtilde);
+
+  // Zero mode / DC component.
+  topcharge_zero = qtilde[0];
+
+  // Spherical (azimuthal) average of the power spectrum |qtilde(k)|^2.
+  // Modes are binned by |k| into shells of width dk = 2*pi/L.
+  std::fill(topcharge_Sk.begin(), topcharge_Sk.end(), 0.0);
+  std::fill(topcharge_Nshell.begin(), topcharge_Nshell.end(), 0.0);
+
+#ifdef SFGPU_CUFFT
+  // GPU path: run the spherical binning on device with atomic adds.
+  // The qtilde array is already on the host after the cuFFT execute+copy.
+  // We upload it to the device, bin there, and download the small result.
+  {
+    const int Nlat = N;
+    const int nbins = NtopchargeBins;
+    const size_t nk = static_cast<size_t>(N) * N * nxh;
+
+    // Upload qtilde as pairs of doubles (re, im packed contiguously)
+    Kokkos::View<double *> qt_dev("qtilde_norm2", nk);
+    {
+      // Pre-compute |qtilde|^2 on host and upload (cheaper than uploading
+      // complex + computing norm on device for this one-shot measurement)
+      std::vector<double> norm2(nk);
+      for (size_t i = 0; i < nk; i++) norm2[i] = std::norm(qtilde[i]);
+      auto qt_host = Kokkos::View<double *, Kokkos::HostSpace,
+                                  Kokkos::MemoryUnmanaged>(norm2.data(), nk);
+      Kokkos::deep_copy(qt_dev, qt_host);
+    }
+
+    Kokkos::View<double *> Sk_dev("Sk", nbins);
+    Kokkos::View<double *> Ns_dev("Nshell", nbins);
+    Kokkos::deep_copy(Sk_dev, 0.0);
+    Kokkos::deep_copy(Ns_dev, 0.0);
+
+    const int half = Nlat / 2;
+    const size_t nxh_local = nxh;
+    Kokkos::parallel_for(
+        "TopchargeBinning",
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>(
+            {0, 0, 0}, {Nlat, Nlat, static_cast<int>(nxh_local)}),
+        KOKKOS_LAMBDA(int kz, int ky, int kx) {
+          const int mz = (kz <= half) ? kz : kz - Nlat;
+          const int my = (ky <= half) ? ky : ky - Nlat;
+          const int mx = kx;
+          const double r = Kokkos::sqrt(
+              static_cast<double>(mx * mx + my * my + mz * mz));
+          int m = static_cast<int>(Kokkos::floor(r + 0.5));
+          if (m >= nbins) m = nbins - 1;
+          const size_t idx =
+              (static_cast<size_t>(kz) * Nlat + static_cast<size_t>(ky)) *
+                  nxh_local +
+              static_cast<size_t>(kx);
+          Kokkos::atomic_add(&Sk_dev(m), qt_dev(idx));
+          Kokkos::atomic_add(&Ns_dev(m), 1.0);
+        });
+    Kokkos::fence();
+
+    // Download small result arrays
+    auto Sk_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Sk_dev);
+    auto Ns_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Ns_dev);
+    for (int m = 0; m < nbins; m++) {
+      topcharge_Nshell[m] = Ns_host(m);
+      topcharge_Sk[m] = (Ns_host(m) > 0.0) ? Sk_host(m) / Ns_host(m) : 0.0;
+    }
+  }
+#else
+  // CPU path
+  {
+    const int half = N / 2;
+    for (int kz = 0; kz < N; kz++) {
+      const int mz = (kz <= half) ? kz : kz - N;
+      for (int ky = 0; ky < N; ky++) {
+        const int my = (ky <= half) ? ky : ky - N;
+        for (int kx = 0; kx < static_cast<int>(nxh); kx++) {
+          const int mx = kx;
+          const double r =
+              sqrt(static_cast<double>(mx * mx + my * my + mz * mz));
+          int m = static_cast<int>(floor(r + 0.5));
+          if (m >= NtopchargeBins) {
+            m = NtopchargeBins - 1;
+          }
+          const size_t idx =
+              (static_cast<size_t>(kz) * N + static_cast<size_t>(ky)) * nxh +
+              static_cast<size_t>(kx);
+          topcharge_Sk[m] += std::norm(qtilde[idx]);
+          topcharge_Nshell[m] += 1.0;
+        }
+      }
+    }
+    for (int m = 0; m < NtopchargeBins; m++) {
+      if (topcharge_Nshell[m] > 0.0) {
+        topcharge_Sk[m] /= topcharge_Nshell[m];
+      }
+    }
+  }
+#endif
 }
 
 // Given the fourier transform of phi_a(t,k) and other fields

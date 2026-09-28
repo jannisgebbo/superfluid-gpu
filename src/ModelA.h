@@ -118,7 +118,9 @@ struct ModelAHandlerData {
   // output files are tag_foo.txt, or tag_bar.h5
   std::string outputfiletag = "o4output";
   int saveFrequency = 3;
+  int saveFrequencyTopcharge = -1;
   int writeFrequency = -1;
+  bool compute_energy = false;
 
   bool eventmode = false;
   int nevents = 1;
@@ -129,7 +131,10 @@ struct ModelAHandlerData {
     seed = params.value("seed", seed);
     outputfiletag = params.value("outputfiletag", "o4output");
     saveFrequency = params.value("saveFrequency", saveFrequency);
+    saveFrequencyTopcharge =
+        params.value("saveFrequencyTopcharge", saveFrequencyTopcharge);
     writeFrequency = params.value("writeFrequency", writeFrequency);
+    compute_energy = params.value("compute_energy", compute_energy);
 
     eventmode = params.value("eventmode", eventmode);
     nevents = params.value("nevents", nevents);
@@ -142,6 +147,8 @@ struct ModelAHandlerData {
                 outputfiletag.c_str());
     PetscPrintf(PETSC_COMM_WORLD, "saveFrequency = %d\n", saveFrequency);
     PetscPrintf(PETSC_COMM_WORLD, "writeFrequency = %d\n", writeFrequency);
+    PetscPrintf(PETSC_COMM_WORLD, "compute_energy = %s\n",
+                (compute_energy ? "true" : "false"));
 
     PetscPrintf(PETSC_COMM_WORLD, "eventmode = %s\n",
                 (eventmode ? "true" : "false"));
