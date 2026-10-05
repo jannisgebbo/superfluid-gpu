@@ -561,6 +561,36 @@ static PetscErrorCode topcharge_kernel_kokkos(
 }
 #endif
 
+#ifdef SFGPU_CUFFT
+// GPU kernel: bin |qtilde(k)|^2 into spherical shells |k| ~ m with atomic adds.
+// A free function because nvcc rejects device lambdas in private members.
+static void topcharge_binning_kokkos(int Nlat, size_t nxh, int nbins,
+                                     const Kokkos::View<double *> &qt_dev,
+                                     const Kokkos::View<double *> &Sk_dev,
+                                     const Kokkos::View<double *> &Ns_dev) {
+  const int half = Nlat / 2;
+  Kokkos::parallel_for(
+      "TopchargeBinning",
+      Kokkos::MDRangePolicy<Kokkos::Rank<3>>(
+          {0, 0, 0}, {Nlat, Nlat, static_cast<int>(nxh)}),
+      KOKKOS_LAMBDA(int kz, int ky, int kx) {
+        const int mz = (kz <= half) ? kz : kz - Nlat;
+        const int my = (ky <= half) ? ky : ky - Nlat;
+        const int mx = kx;
+        const double r = Kokkos::sqrt(
+            static_cast<double>(mx * mx + my * my + mz * mz));
+        int m = static_cast<int>(Kokkos::floor(r + 0.5));
+        if (m >= nbins) m = nbins - 1;
+        const size_t idx =
+            (static_cast<size_t>(kz) * Nlat + static_cast<size_t>(ky)) * nxh +
+            static_cast<size_t>(kx);
+        Kokkos::atomic_add(&Sk_dev(m), qt_dev(idx));
+        Kokkos::atomic_add(&Ns_dev(m), 1.0);
+      });
+  Kokkos::fence();
+}
+#endif
+
 void Measurer::computeTopChargeFourier(Vec *solution) {
   DM &da = model->domain;
   Vec localU;
@@ -676,28 +706,7 @@ void Measurer::computeTopChargeFourier(Vec *solution) {
     Kokkos::deep_copy(Sk_dev, 0.0);
     Kokkos::deep_copy(Ns_dev, 0.0);
 
-    const int half = Nlat / 2;
-    const size_t nxh_local = nxh;
-    Kokkos::parallel_for(
-        "TopchargeBinning",
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>(
-            {0, 0, 0}, {Nlat, Nlat, static_cast<int>(nxh_local)}),
-        KOKKOS_LAMBDA(int kz, int ky, int kx) {
-          const int mz = (kz <= half) ? kz : kz - Nlat;
-          const int my = (ky <= half) ? ky : ky - Nlat;
-          const int mx = kx;
-          const double r = Kokkos::sqrt(
-              static_cast<double>(mx * mx + my * my + mz * mz));
-          int m = static_cast<int>(Kokkos::floor(r + 0.5));
-          if (m >= nbins) m = nbins - 1;
-          const size_t idx =
-              (static_cast<size_t>(kz) * Nlat + static_cast<size_t>(ky)) *
-                  nxh_local +
-              static_cast<size_t>(kx);
-          Kokkos::atomic_add(&Sk_dev(m), qt_dev(idx));
-          Kokkos::atomic_add(&Ns_dev(m), 1.0);
-        });
-    Kokkos::fence();
+    topcharge_binning_kokkos(Nlat, nxh, nbins, qt_dev, Sk_dev, Ns_dev);
 
     // Download small result arrays
     auto Sk_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Sk_dev);
