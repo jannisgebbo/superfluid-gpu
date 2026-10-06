@@ -135,6 +135,19 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       PetscLogStagePop();
     }
 
+    // on separate frequency: radially binned 3D power spectra of the fields
+    if (ahandler.saveFrequencyFields > 0 and
+        steps % ahandler.saveFrequencyFields == 0) {
+      PetscLogStagePush(prof.measure_stage);
+      PetscLogEventBegin(measurements, 0, 0, 0, 0);
+      measurer.measure_field_spectra(&model->solution);
+      if (rank == 0) {
+        measurer_output->save_field_spectra();
+      }
+      PetscLogEventEnd(measurements, 0, 0, 0, 0);
+      PetscLogStagePop();
+    }
+
     // Write the solution to tape if writeFrequency > 0. This is used for
     // plotting of the solution. It is normally not analyzed, or written.
     if (ahandler.writeFrequency > 0 and steps % ahandler.writeFrequency == 0) {

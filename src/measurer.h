@@ -7,6 +7,7 @@
 #include <complex>
 #include <fftw3.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #ifdef SFGPU_CUFFT
 #include <cufft.h>
@@ -53,108 +54,93 @@ public:
 
 ////////////////////////////////////////////////////////////////////////
 // Class to compute a real-to-complex 3D fourier transform of a scalar field
-// on a periodic box.  Normalization convention (same as measurer_fft, in 3D):
+// on a periodic box.  The transform is unnormalized,
 //
-//   W(k) = (1 / (n0*n1*n2)) \sum_x e^{-i k.x} W(x)
+//   W(k) = \sum_x e^{-i k.x} W(x),
 //
-// The dimensions are (n0, n1, n2) in row-major (C) order, so that the last
-// index n2 is contiguous in memory.  The real input has size n0*n1*n2 and the
+// and callers divide by n0*n1*n2 (see Measurer::radialSpectrum).  The
+// dimensions are (n0, n1, n2) in row-major (C) order, so that the last index
+// n2 is contiguous in memory.  The real input has size n0*n1*n2 and the
 // complex output (r2c half spectrum) has size n0*n1*(n2/2+1).
 //
-// When built with SFGPU_CUFFT (Kokkos + CUDA), the FFT runs on the GPU via
-// cuFFT and is typically 10-30x faster than single-rank FFTW for large grids.
-// The FFTW path is kept as fallback for CPU-only builds.
+// execute_host transforms host memory with FFTW. With SFGPU_CUFFT,
+// execute_device transforms device memory with cuFFT and leaves the result on
+// the device. The plans and buffers are made on first use, so a GPU run never
+// allocates the FFTW arrays and vice versa.
 class measurer_fft_3d {
 
 private:
   size_t n0, n1, n2;
   size_t out_size;
-#ifdef SFGPU_CUFFT
-  cufftHandle cufft_plan;
-  double *d_in = nullptr;
-  cufftDoubleComplex *d_out = nullptr;
-  bool use_cufft = true;
-#endif
-  // FFTW fallback (always available)
+  // FFTW (host)
   std::vector<double> in_ptr;
   std::vector<std::complex<double>> out_ptr;
-  fftw_plan fftw_plan_handle;
+  fftw_plan fftw_plan_handle = nullptr;
+#ifdef SFGPU_CUFFT
+  // cuFFT (device)
+  cufftHandle cufft_plan;
+  bool have_cufft = false;
+  cufftDoubleComplex *d_out = nullptr;
+#endif
 
 public:
   measurer_fft_3d(const size_t N0, const size_t N1, const size_t N2)
-      : n0(N0), n1(N1), n2(N2),
-        out_size(N0 * N1 * (N2 / 2 + 1)),
-        in_ptr(N0 * N1 * N2, 0.),
-        out_ptr(N0 * N1 * (N2 / 2 + 1), 0.) {
-    // Always create the FFTW plan (cheap, and needed for non-CUDA builds)
-    fftw_plan_handle = fftw_plan_dft_r2c_3d(
-        static_cast<int>(N0), static_cast<int>(N1), static_cast<int>(N2),
-        in_ptr.data(), reinterpret_cast<fftw_complex *>(out_ptr.data()),
-        FFTW_MEASURE);
-#ifdef SFGPU_CUFFT
-    // Create the cuFFT plan and allocate device buffers
-    if (cufftPlan3d(&cufft_plan, static_cast<int>(N0), static_cast<int>(N1),
-                    static_cast<int>(N2), CUFFT_D2Z) != CUFFT_SUCCESS) {
-      use_cufft = false;
-    } else {
-      cudaMalloc(&d_in, N0 * N1 * N2 * sizeof(double));
-      cudaMalloc(&d_out, out_size * sizeof(cufftDoubleComplex));
-      if (!d_in || !d_out) {
-        // Allocation failed, fall back to FFTW
-        if (d_in) cudaFree(d_in);
-        if (d_out) cudaFree(d_out);
-        d_in = nullptr;
-        d_out = nullptr;
-        cufftDestroy(cufft_plan);
-        use_cufft = false;
-      }
-    }
-#endif
-  }
+      : n0(N0), n1(N1), n2(N2), out_size(N0 * N1 * (N2 / 2 + 1)) {}
 
   ~measurer_fft_3d() {
-    fftw_destroy_plan(fftw_plan_handle);
+    if (fftw_plan_handle) {
+      fftw_destroy_plan(fftw_plan_handle);
+    }
 #ifdef SFGPU_CUFFT
-    if (use_cufft) {
+    if (have_cufft) {
       cufftDestroy(cufft_plan);
-      cudaFree(d_in);
       cudaFree(d_out);
     }
 #endif
   }
 
-  // Transform the real volume `in` (size n0*n1*n2) into the complex half
-  // spectrum `out` (size n0*n1*(n2/2+1)), applying the 1/(n0*n1*n2) norm.
-  void execute(const std::vector<double> &in,
-               std::vector<std::complex<double>> &out) {
-    const double norm = static_cast<double>(n0 * n1 * n2);
-#ifdef SFGPU_CUFFT
-    if (use_cufft) {
-      const size_t in_size = n0 * n1 * n2;
-      // Host -> device
-      cudaMemcpy(d_in, in.data(), in_size * sizeof(double),
-                 cudaMemcpyHostToDevice);
-      // Execute R2C transform on GPU
-      cufftExecD2Z(cufft_plan, d_in, d_out);
-      cudaDeviceSynchronize();
-      // Device -> host (cufftDoubleComplex is layout-compatible with
-      // std::complex<double>)
-      cudaMemcpy(out.data(), d_out, out_size * sizeof(std::complex<double>),
-                 cudaMemcpyDeviceToHost);
-      // Normalize
-      for (size_t i = 0; i < out_size; i++) {
-        out[i] /= norm;
-      }
-      return;
+  size_t size_in() const { return n0 * n1 * n2; }
+  size_t size_out() const { return out_size; }
+
+  // Transform the real volume `in` (host memory, size n0*n1*n2). Returns the
+  // half spectrum in host memory, valid until the next call.
+  const std::complex<double> *execute_host(const double *in) {
+    if (!fftw_plan_handle) {
+      in_ptr.assign(size_in(), 0.);
+      out_ptr.assign(out_size, 0.);
+      fftw_plan_handle = fftw_plan_dft_r2c_3d(
+          static_cast<int>(n0), static_cast<int>(n1), static_cast<int>(n2),
+          in_ptr.data(), reinterpret_cast<fftw_complex *>(out_ptr.data()),
+          FFTW_MEASURE);
     }
-#endif
-    // FFTW fallback
-    std::copy(in.begin(), in.end(), in_ptr.begin());
+    std::copy(in, in + size_in(), in_ptr.begin());
     fftw_execute(fftw_plan_handle);
-    for (size_t i = 0; i < out_ptr.size(); i++) {
-      out[i] = out_ptr[i] / norm;
-    }
+    return out_ptr.data();
   }
+
+#ifdef SFGPU_CUFFT
+  // Transform the real volume `d_in` (device memory, size n0*n1*n2; not
+  // modified). Returns the half spectrum in device memory, valid until the
+  // next call.
+  const cufftDoubleComplex *execute_device(const double *d_in) {
+    if (!have_cufft) {
+      if (cufftPlan3d(&cufft_plan, static_cast<int>(n0), static_cast<int>(n1),
+                      static_cast<int>(n2), CUFFT_D2Z) != CUFFT_SUCCESS) {
+        throw std::runtime_error("measurer_fft_3d: cufftPlan3d failed");
+      }
+      if (cudaMalloc(&d_out, out_size * sizeof(cufftDoubleComplex)) !=
+          cudaSuccess) {
+        cufftDestroy(cufft_plan);
+        throw std::runtime_error("measurer_fft_3d: cudaMalloc failed");
+      }
+      have_cufft = true;
+    }
+    // An out-of-place D2Z transform leaves its input unchanged
+    cufftExecD2Z(cufft_plan, const_cast<double *>(d_in), d_out);
+    cudaDeviceSynchronize();
+    return d_out;
+  }
+#endif
 };
 
 ////////////////////////////////////////////////////////////////////////
@@ -218,6 +204,15 @@ public:
   std::vector<double> topcharge_kbins;  // |k| bin centers, = m*dk
   std::vector<double> topcharge_Nshell; // number of modes per shell
   std::complex<double> topcharge_zero{0., 0.}; // qtilde(k=0), DC component
+
+  // Spherically-averaged power spectra of the fields from the full 3D grid
+  // (see computeFieldSpectra in measurer.cxx), with the same |k| bins as the
+  // topological charge. field_Sk is NFieldSpectra x NtopchargeBins (row
+  // major): S_c(k) = <|U_c(k)|^2> per radial shell for U = (phi[4], A[3],
+  // V[3]), with U_c(k) = (1/N^3) \sum_x e^{-ikx} U_c(x).
+  static const PetscInt NFieldSpectra = ModelAData::Ndof;
+  std::vector<double> field_Sk;
+  std::vector<double> field_Nshell; // number of modes per shell
 
   // First dimension is NObs, last is spatial index x=0...N
   nvector<PetscScalar, 2> wallX;
@@ -303,13 +298,18 @@ public:
     for (int m = 0; m < NtopchargeBins; m++) {
       topcharge_kbins[m] = m * topcharge_dk;
     }
-    // Only rank 0 assembles the full q(x) volume and takes its 3D FFT.
-    if (rank == 0) {
-      fftw3d = std::make_unique<measurer_fft_3d>(N, N, N);
-    }
+    field_Sk.assign(NFieldSpectra * NtopchargeBins, 0.);
+    field_Nshell.assign(NtopchargeBins, 0.);
+    // The 3D FFT machinery is set up on first use (setupSpectra)
   }
 
-  virtual ~Measurer() {}
+  virtual ~Measurer() {
+    VecScatterDestroy(&toZero);
+    VecDestroy(&qseq);
+    VecDestroy(&qnat);
+    VecDestroy(&qglob);
+    DMDestroy(&da1);
+  }
 
   // Takes the vector, solution,  and computes the walls and their fourier
   // transforms and the rotated versions.  On output the arrays wallX, wallX_k,
@@ -335,9 +335,14 @@ public:
     computeTopChargeFourier(solution);
   }
 
+  // Computes field_Sk, the radially binned 3D power spectra of all field
+  // components. Collective, like measure_topcharge.
+  void measure_field_spectra(Vec *solution) { computeFieldSpectra(solution); }
+
   ModelA *getModel() { return model; }
   PetscInt getN() { return N; }
   int getNTopchargeBins() { return NtopchargeBins; }
+  int getNFieldSpectra() { return NFieldSpectra; }
   double getTopchargeDk() { return topcharge_dk; }
 
 private:
@@ -349,13 +354,28 @@ private:
   void computeSliceAveragePhase(Vec *solution);
   void computeDerivedObs();
   void computeTopChargeFourier(Vec *solution);
+  void computeFieldSpectra(Vec *solution);
+
+  // 3D spectra of a scalar field q(x). q lives in qglob, a global vector of
+  // the 1-dof DMDA da1 with the same layout as the model's domain.
+  // radialSpectrum brings q to rank 0 in natural order (only a copy for one
+  // rank), takes its FFT there (cuFFT if q is on the device) and bins
+  // |q(k)|^2 into the |k| shells; Sk, Nshell and zero are set on rank 0.
+  PetscErrorCode setupSpectra();
+  PetscErrorCode radialSpectrum(double *Sk, double *Nshell,
+                                std::complex<double> *zero);
+  DM da1 = nullptr;
+  Vec qglob = nullptr;
+  Vec qnat = nullptr;           // natural ordering (more than one rank)
+  Vec qseq = nullptr;           // all of q on rank 0 (more than one rank)
+  VecScatter toZero = nullptr;
 
   ModelA *model;
   PetscInt N;
 
   // FFT engine using the fftw3 library
   std::unique_ptr<measurer_fft> fftw;
-  // 3D FFT engine for the topological charge density (rank 0 only)
+  // 3D FFT engine for the spectra (rank 0 only, made by setupSpectra)
   std::unique_ptr<measurer_fft_3d> fftw3d;
 };
 

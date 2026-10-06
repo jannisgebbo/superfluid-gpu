@@ -520,22 +520,43 @@ double det4x4(const double r0[4], const double r1[4],
   return r0[0] * m123 - r0[1] * m023 + r0[2] * m013 - r0[3] * m012;
 }
 
+// Radial shell m of the mode (kz, ky, kx) of the r2c half spectrum: modes
+// with |k| = m*dk (rounded) share a shell, the last shell collects the corners
 #ifdef SFGPU_KOKKOS
-// GPU kernel: compute q(x) at each owned site and write into a device buffer
-// indexed in natural (lexicographic) order: idx = i + N*j + N*N*k.
-// Sites not owned by this rank stay zero so MPI_Reduce(SUM) assembles all.
-static PetscErrorCode topcharge_kernel_kokkos(
-    DM da, Vec localU, PetscInt N, double prefac,
-    double inv2hx, double inv2hy, double inv2hz,
-    Kokkos::View<double *> &qdev) {
+O4_FUNCTION
+#else
+static inline
+#endif
+int shell_index(int kz, int ky, int kx, int Nlat, int nbins) {
+  const int half = Nlat / 2;
+  const int mz = (kz <= half) ? kz : kz - Nlat;
+  const int my = (ky <= half) ? ky : ky - Nlat;
+  const double r = sqrt(static_cast<double>(kx * kx + my * my + mz * mz));
+  const int m = static_cast<int>(floor(r + 0.5));
+  return (m < nbins) ? m : nbins - 1;
+}
+
+#ifdef SFGPU_KOKKOS
+// One value per owned site of the 1-dof DMDA used for the spectra
+using SiteValueView =
+    Kokkos::Experimental::OffsetView<PetscScalar ***, Kokkos::LayoutRight,
+                                     KokkosMemSpace>;
+
+// GPU kernel: compute q(x) at each owned site into q (a global vector of
+// da1). localU is the ghosted solution.
+static PetscErrorCode topcharge_kernel_kokkos(DM da, Vec localU, DM da1,
+                                              Vec q, double prefac,
+                                              double inv2hx, double inv2hy,
+                                              double inv2hz) {
   PetscFunctionBeginUser;
   PetscInt xs, ys, zs, xm, ym, zm;
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
 
   ConstNodeView u;
   PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, localU, &u));
+  SiteValueView qv;
+  PetscCall(DMDAVecGetKokkosOffsetViewWrite(da1, q, &qv));
 
-  const PetscInt Nlat = N;
   Kokkos::parallel_for(
       "TopChargeDensity",
       SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
@@ -548,205 +569,266 @@ static PetscErrorCode topcharge_kernel_kokkos(
           Dy[a] = (u(k, j + 1, i, a) - u(k, j - 1, i, a)) * inv2hy;
           Dz[a] = (u(k + 1, j, i, a) - u(k - 1, j, i, a)) * inv2hz;
         }
-        const double q = prefac * det4x4(phi, Dx, Dy, Dz);
-        const size_t idx = static_cast<size_t>(i) +
-                           static_cast<size_t>(Nlat) * j +
-                           static_cast<size_t>(Nlat) * Nlat * k;
-        qdev(idx) = q;
+        qv(k, j, i) = prefac * det4x4(phi, Dx, Dy, Dz);
       });
   Kokkos::fence();
 
+  PetscCall(DMDAVecRestoreKokkosOffsetViewWrite(da1, q, &qv));
   PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, localU, &u));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+// GPU kernel: copy the field component c of the solution U into q (a global
+// vector of da1)
+static PetscErrorCode field_component_kokkos(DM da, Vec U, PetscInt c, DM da1,
+                                             Vec q) {
+  PetscFunctionBeginUser;
+  PetscInt xs, ys, zs, xm, ym, zm;
+  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+
+  ConstNodeView u;
+  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, U, &u));
+  SiteValueView qv;
+  PetscCall(DMDAVecGetKokkosOffsetViewWrite(da1, q, &qv));
+
+  Kokkos::parallel_for(
+      "FieldComponent",
+      SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
+      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+        qv(k, j, i) = u(k, j, i, c);
+      });
+  Kokkos::fence();
+
+  PetscCall(DMDAVecRestoreKokkosOffsetViewWrite(da1, q, &qv));
+  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, U, &u));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 #endif
 
 #ifdef SFGPU_CUFFT
-// GPU kernel: bin |qtilde(k)|^2 into spherical shells |k| ~ m with atomic adds.
-// A free function because nvcc rejects device lambdas in private members.
-static void topcharge_binning_kokkos(int Nlat, size_t nxh, int nbins,
-                                     const Kokkos::View<double *> &qt_dev,
-                                     const Kokkos::View<double *> &Sk_dev,
-                                     const Kokkos::View<double *> &Ns_dev) {
-  const int half = Nlat / 2;
+// GPU kernel: bin scale*|ft(k)|^2 of the half spectrum ft (device memory)
+// into the radial shells with atomic adds. A free function because nvcc
+// rejects device lambdas in private members.
+static void radial_binning_kokkos(const cufftDoubleComplex *ft, int Nlat,
+                                  int nbins, double scale,
+                                  const Kokkos::View<double *> &Sk,
+                                  const Kokkos::View<double *> &Ns) {
+  const int nxh = Nlat / 2 + 1;
   Kokkos::parallel_for(
-      "TopchargeBinning",
-      Kokkos::MDRangePolicy<Kokkos::Rank<3>>(
-          {0, 0, 0}, {Nlat, Nlat, static_cast<int>(nxh)}),
+      "RadialBinning",
+      Kokkos::MDRangePolicy<
+          Kokkos::Rank<3, Kokkos::Iterate::Right, Kokkos::Iterate::Right>>(
+          {0, 0, 0}, {Nlat, Nlat, nxh}),
       KOKKOS_LAMBDA(int kz, int ky, int kx) {
-        const int mz = (kz <= half) ? kz : kz - Nlat;
-        const int my = (ky <= half) ? ky : ky - Nlat;
-        const int mx = kx;
-        const double r = Kokkos::sqrt(
-            static_cast<double>(mx * mx + my * my + mz * mz));
-        int m = static_cast<int>(Kokkos::floor(r + 0.5));
-        if (m >= nbins) m = nbins - 1;
+        const int m = shell_index(kz, ky, kx, Nlat, nbins);
         const size_t idx =
             (static_cast<size_t>(kz) * Nlat + static_cast<size_t>(ky)) * nxh +
             static_cast<size_t>(kx);
-        Kokkos::atomic_add(&Sk_dev(m), qt_dev(idx));
-        Kokkos::atomic_add(&Ns_dev(m), 1.0);
+        const cufftDoubleComplex z = ft[idx];
+        Kokkos::atomic_add(&Sk(m), scale * (z.x * z.x + z.y * z.y));
+        Kokkos::atomic_add(&Ns(m), 1.0);
       });
   Kokkos::fence();
 }
 #endif
 
+// Bin scale*|ft(k)|^2 of the half spectrum ft (host memory) into the radial
+// shells
+static void radial_binning_host(const std::complex<double> *ft, int Nlat,
+                                int nbins, double scale, double *Sk,
+                                double *Ns) {
+  const int nxh = Nlat / 2 + 1;
+  for (int kz = 0; kz < Nlat; kz++) {
+    for (int ky = 0; ky < Nlat; ky++) {
+      for (int kx = 0; kx < nxh; kx++) {
+        const int m = shell_index(kz, ky, kx, Nlat, nbins);
+        const size_t idx =
+            (static_cast<size_t>(kz) * Nlat + static_cast<size_t>(ky)) * nxh +
+            static_cast<size_t>(kx);
+        Sk[m] += scale * std::norm(ft[idx]);
+        Ns[m] += 1.0;
+      }
+    }
+  }
+}
+
+PetscErrorCode Measurer::setupSpectra() {
+  PetscFunctionBeginUser;
+  if (da1) {
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  // A 1-dof DMDA with the same layout as the domain, and the same vector
+  // type (Kokkos vectors stay on the device)
+  DM &da = model->domain;
+  VecType vtype;
+  PetscCall(DMDACreateCompatibleDMDA(da, 1, &da1));
+  PetscCall(DMGetVecType(da, &vtype));
+  PetscCall(DMSetVecType(da1, vtype));
+  PetscCall(DMCreateGlobalVector(da1, &qglob));
+
+  PetscMPIInt size, rank;
+  PetscCallMPI(MPI_Comm_size(PETSC_COMM_WORLD, &size));
+  PetscCallMPI(MPI_Comm_rank(PETSC_COMM_WORLD, &rank));
+  if (size > 1) {
+    PetscCall(DMDACreateNaturalVector(da1, &qnat));
+    PetscCall(VecScatterCreateToZero(qnat, &toZero, &qseq));
+  }
+  if (rank == 0) {
+    fftw3d = std::make_unique<measurer_fft_3d>(N, N, N);
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode Measurer::radialSpectrum(double *Sk, double *Nshell,
+                                        std::complex<double> *zero) {
+  PetscFunctionBeginUser;
+  // Bring q to rank 0 in natural ordering, idx = i + N*j + N*N*k. With one
+  // rank the global ordering of the DMDA already is the natural one.
+  Vec qfull = qglob;
+  if (toZero) {
+    PetscCall(DMDAGlobalToNaturalBegin(da1, qglob, INSERT_VALUES, qnat));
+    PetscCall(DMDAGlobalToNaturalEnd(da1, qglob, INSERT_VALUES, qnat));
+    PetscCall(
+        VecScatterBegin(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD));
+    PetscCall(
+        VecScatterEnd(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD));
+    qfull = qseq;
+  }
+  PetscMPIInt rank;
+  PetscCallMPI(MPI_Comm_rank(PETSC_COMM_WORLD, &rank));
+  if (rank != 0) {
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+
+  // S(k) = <|q(k)|^2> per shell with q(k) = (1/N^3) \sum_x e^{-ikx} q(x)
+  const int nbins = NtopchargeBins;
+  const double ntot = static_cast<double>(fftw3d->size_in());
+  const double scale = 1.0 / (ntot * ntot);
+  std::fill(Sk, Sk + nbins, 0.0);
+  std::fill(Nshell, Nshell + nbins, 0.0);
+
+  const PetscScalar *q;
+  PetscMemType mtype;
+  PetscCall(VecGetArrayReadAndMemType(qfull, &q, &mtype));
+#ifdef SFGPU_CUFFT
+  if (PetscMemTypeDevice(mtype)) {
+    // FFT and binning on the device; only the shells come back to the host
+    Kokkos::fence();
+    const cufftDoubleComplex *ft = fftw3d->execute_device(q);
+    Kokkos::View<double *> Sk_dev("Sk", nbins);
+    Kokkos::View<double *> Ns_dev("Nshell", nbins);
+    radial_binning_kokkos(ft, N, nbins, scale, Sk_dev, Ns_dev);
+    auto Sk_host =
+        Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Sk_dev);
+    auto Ns_host =
+        Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Ns_dev);
+    for (int m = 0; m < nbins; m++) {
+      Sk[m] = Sk_host(m);
+      Nshell[m] = Ns_host(m);
+    }
+    cufftDoubleComplex z0;
+    cudaMemcpy(&z0, ft, sizeof(z0), cudaMemcpyDeviceToHost);
+    *zero = std::complex<double>(z0.x, z0.y) / ntot;
+  } else
+#endif
+  {
+    (void)mtype;
+    const std::complex<double> *ft = fftw3d->execute_host(q);
+    radial_binning_host(ft, N, nbins, scale, Sk, Nshell);
+    *zero = ft[0] / ntot;
+  }
+  PetscCall(VecRestoreArrayReadAndMemType(qfull, &q));
+
+  for (int m = 0; m < nbins; m++) {
+    if (Nshell[m] > 0.0) {
+      Sk[m] /= Nshell[m];
+    }
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 void Measurer::computeTopChargeFourier(Vec *solution) {
+  setupSpectra();
+
   DM &da = model->domain;
   Vec localU;
   DMGetLocalVector(da, &localU);
   ghost_exchange(da, *solution, localU);
 
   const auto &data = model->data;
-  const double hx = data.hX();
-  const double hy = data.hY();
-  const double hz = data.hZ();
+  const double inv2hx = 1.0 / (2.0 * data.hX());
+  const double inv2hy = 1.0 / (2.0 * data.hY());
+  const double inv2hz = 1.0 / (2.0 * data.hZ());
   const double prefac = 1.0 / (12.0 * M_PI * M_PI);
-
-  PetscInt ixs, iys, izs, nx, ny, nz;
-  DMDAGetCorners(da, &ixs, &iys, &izs, &nx, &ny, &nz);
-
-  const size_t Ntot = static_cast<size_t>(N) * N * N;
-  std::vector<double> qlocal(Ntot, 0.0);
 
 #ifdef SFGPU_KOKKOS
   if (is_kokkos_vec(*solution)) {
-    // GPU path: compute q(x) on device, copy to host
-    Kokkos::View<double *> qdev("topcharge_q", Ntot);
-    Kokkos::deep_copy(qdev, 0.0);
-    topcharge_kernel_kokkos(da, localU, N, prefac,
-                            1.0 / (2.0 * hx), 1.0 / (2.0 * hy),
-                            1.0 / (2.0 * hz), qdev);
-    auto qhost = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), qdev);
-    std::memcpy(qlocal.data(), qhost.data(), Ntot * sizeof(double));
+    topcharge_kernel_kokkos(da, localU, da1, qglob, prefac, inv2hx, inv2hy,
+                            inv2hz);
   } else
 #endif
   {
-    // Host path
+    PetscInt xs, ys, zs, xm, ym, zm;
+    DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
     G_node ***fld;
     DMDAVecGetArrayRead(da, localU, &fld);
-
-    for (int k = izs; k < izs + nz; k++) {
-      for (int j = iys; j < iys + ny; j++) {
-        for (int i = ixs; i < ixs + nx; i++) {
+    PetscScalar ***q;
+    DMDAVecGetArray(da1, qglob, &q);
+    for (PetscInt k = zs; k < zs + zm; k++) {
+      for (PetscInt j = ys; j < ys + ym; j++) {
+        for (PetscInt i = xs; i < xs + xm; i++) {
           double phi[ModelAData::Nphi], Dx[ModelAData::Nphi],
               Dy[ModelAData::Nphi], Dz[ModelAData::Nphi];
           for (int a = 0; a < ModelAData::Nphi; a++) {
             phi[a] = fld[k][j][i].f[a];
-            Dx[a] = (fld[k][j][i + 1].f[a] - fld[k][j][i - 1].f[a]) / (2.0 * hx);
-            Dy[a] = (fld[k][j + 1][i].f[a] - fld[k][j - 1][i].f[a]) / (2.0 * hy);
-            Dz[a] = (fld[k + 1][j][i].f[a] - fld[k - 1][j][i].f[a]) / (2.0 * hz);
+            Dx[a] = (fld[k][j][i + 1].f[a] - fld[k][j][i - 1].f[a]) * inv2hx;
+            Dy[a] = (fld[k][j + 1][i].f[a] - fld[k][j - 1][i].f[a]) * inv2hy;
+            Dz[a] = (fld[k + 1][j][i].f[a] - fld[k - 1][j][i].f[a]) * inv2hz;
           }
-          const double q = prefac * det4x4(phi, Dx, Dy, Dz);
-          const size_t idx = static_cast<size_t>(i) +
-                             static_cast<size_t>(N) * j +
-                             static_cast<size_t>(N) * N * k;
-          qlocal[idx] = q;
+          q[k][j][i] = prefac * det4x4(phi, Dx, Dy, Dz);
         }
       }
     }
-
+    DMDAVecRestoreArray(da1, qglob, &q);
     DMDAVecRestoreArrayRead(da, localU, &fld);
   }
-
   DMRestoreLocalVector(da, &localU);
 
-  // Assemble the full q(x) volume on rank 0.
-  int rank = -1;
-  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-  std::vector<double> qfull;
-  if (rank == 0) {
-    qfull.assign(Ntot, 0.0);
-  }
-  MPI_Reduce(qlocal.data(), rank == 0 ? qfull.data() : nullptr,
-             static_cast<int>(Ntot), MPI_DOUBLE, MPI_SUM, 0, PETSC_COMM_WORLD);
+  radialSpectrum(topcharge_Sk.data(), topcharge_Nshell.data(),
+                 &topcharge_zero);
+}
 
-  if (rank != 0) {
-    return;
-  }
+void Measurer::computeFieldSpectra(Vec *solution) {
+  setupSpectra();
 
-  // 3D FFT.  The FFTW/cuFFT dimensions are (n0,n1,n2) = (NZ,NY,NX) so that
-  // the x direction is the contiguous (last) index, matching the natural
-  // ordering idx = i + N*j + N*N*k used to fill qfull above.
-  const size_t nxh = static_cast<size_t>(N / 2 + 1);
-  std::vector<std::complex<double>> qtilde(static_cast<size_t>(N) * N * nxh);
-  fftw3d->execute(qfull, qtilde);
-
-  // Zero mode / DC component.
-  topcharge_zero = qtilde[0];
-
-  // Spherical (azimuthal) average of the power spectrum |qtilde(k)|^2.
-  // Modes are binned by |k| into shells of width dk = 2*pi/L.
-  std::fill(topcharge_Sk.begin(), topcharge_Sk.end(), 0.0);
-  std::fill(topcharge_Nshell.begin(), topcharge_Nshell.end(), 0.0);
-
-#ifdef SFGPU_CUFFT
-  // GPU path: run the spherical binning on device with atomic adds.
-  // The qtilde array is already on the host after the cuFFT execute+copy.
-  // We upload it to the device, bin there, and download the small result.
-  {
-    const int Nlat = N;
-    const int nbins = NtopchargeBins;
-    const size_t nk = static_cast<size_t>(N) * N * nxh;
-
-    // Upload qtilde as pairs of doubles (re, im packed contiguously)
-    Kokkos::View<double *> qt_dev("qtilde_norm2", nk);
+  DM &da = model->domain;
+  const int nbins = NtopchargeBins;
+  std::complex<double> zero; // = the average of the field, not stored
+  for (PetscInt c = 0; c < NFieldSpectra; c++) {
+#ifdef SFGPU_KOKKOS
+    if (is_kokkos_vec(*solution)) {
+      field_component_kokkos(da, *solution, c, da1, qglob);
+    } else
+#endif
     {
-      // Pre-compute |qtilde|^2 on host and upload (cheaper than uploading
-      // complex + computing norm on device for this one-shot measurement)
-      std::vector<double> norm2(nk);
-      for (size_t i = 0; i < nk; i++) norm2[i] = std::norm(qtilde[i]);
-      auto qt_host = Kokkos::View<double *, Kokkos::HostSpace,
-                                  Kokkos::MemoryUnmanaged>(norm2.data(), nk);
-      Kokkos::deep_copy(qt_dev, qt_host);
-    }
-
-    Kokkos::View<double *> Sk_dev("Sk", nbins);
-    Kokkos::View<double *> Ns_dev("Nshell", nbins);
-    Kokkos::deep_copy(Sk_dev, 0.0);
-    Kokkos::deep_copy(Ns_dev, 0.0);
-
-    topcharge_binning_kokkos(Nlat, nxh, nbins, qt_dev, Sk_dev, Ns_dev);
-
-    // Download small result arrays
-    auto Sk_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Sk_dev);
-    auto Ns_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Ns_dev);
-    for (int m = 0; m < nbins; m++) {
-      topcharge_Nshell[m] = Ns_host(m);
-      topcharge_Sk[m] = (Ns_host(m) > 0.0) ? Sk_host(m) / Ns_host(m) : 0.0;
-    }
-  }
-#else
-  // CPU path
-  {
-    const int half = N / 2;
-    for (int kz = 0; kz < N; kz++) {
-      const int mz = (kz <= half) ? kz : kz - N;
-      for (int ky = 0; ky < N; ky++) {
-        const int my = (ky <= half) ? ky : ky - N;
-        for (int kx = 0; kx < static_cast<int>(nxh); kx++) {
-          const int mx = kx;
-          const double r =
-              sqrt(static_cast<double>(mx * mx + my * my + mz * mz));
-          int m = static_cast<int>(floor(r + 0.5));
-          if (m >= NtopchargeBins) {
-            m = NtopchargeBins - 1;
+      PetscInt xs, ys, zs, xm, ym, zm;
+      DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
+      PetscScalar ****u;
+      DMDAVecGetArrayDOFRead(da, *solution, &u);
+      PetscScalar ***q;
+      DMDAVecGetArray(da1, qglob, &q);
+      for (PetscInt k = zs; k < zs + zm; k++) {
+        for (PetscInt j = ys; j < ys + ym; j++) {
+          for (PetscInt i = xs; i < xs + xm; i++) {
+            q[k][j][i] = u[k][j][i][c];
           }
-          const size_t idx =
-              (static_cast<size_t>(kz) * N + static_cast<size_t>(ky)) * nxh +
-              static_cast<size_t>(kx);
-          topcharge_Sk[m] += std::norm(qtilde[idx]);
-          topcharge_Nshell[m] += 1.0;
         }
       }
+      DMDAVecRestoreArray(da1, qglob, &q);
+      DMDAVecRestoreArrayDOFRead(da, *solution, &u);
     }
-    for (int m = 0; m < NtopchargeBins; m++) {
-      if (topcharge_Nshell[m] > 0.0) {
-        topcharge_Sk[m] /= topcharge_Nshell[m];
-      }
-    }
+    radialSpectrum(&field_Sk[c * nbins], field_Nshell.data(), &zero);
   }
-#endif
 }
 
 // Given the fourier transform of phi_a(t,k) and other fields

@@ -119,6 +119,8 @@ struct ModelAHandlerData {
   std::string outputfiletag = "o4output";
   int saveFrequency = 3;
   int saveFrequencyTopcharge = -1;
+  // Radially binned 3D power spectra of the fields (see Measurer)
+  int saveFrequencyFields = -1;
   int writeFrequency = -1;
   bool compute_energy = false;
 
@@ -133,6 +135,8 @@ struct ModelAHandlerData {
     saveFrequency = params.value("saveFrequency", saveFrequency);
     saveFrequencyTopcharge =
         params.value("saveFrequencyTopcharge", saveFrequencyTopcharge);
+    saveFrequencyFields =
+        params.value("saveFrequencyFields", saveFrequencyFields);
     writeFrequency = params.value("writeFrequency", writeFrequency);
     compute_energy = params.value("compute_energy", compute_energy);
 
@@ -146,6 +150,10 @@ struct ModelAHandlerData {
     PetscPrintf(PETSC_COMM_WORLD, "outputfiletag = %s\n",
                 outputfiletag.c_str());
     PetscPrintf(PETSC_COMM_WORLD, "saveFrequency = %d\n", saveFrequency);
+    PetscPrintf(PETSC_COMM_WORLD, "saveFrequencyTopcharge = %d\n",
+                saveFrequencyTopcharge);
+    PetscPrintf(PETSC_COMM_WORLD, "saveFrequencyFields = %d\n",
+                saveFrequencyFields);
     PetscPrintf(PETSC_COMM_WORLD, "writeFrequency = %d\n", writeFrequency);
     PetscPrintf(PETSC_COMM_WORLD, "compute_energy = %s\n",
                 (compute_energy ? "true" : "false"));

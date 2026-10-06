@@ -73,6 +73,15 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   NN1 = {2};
   topcharge_zero =
       std::make_unique<ntuple<1>>(NN1, "topcharge_zeromode", file_id);
+
+  // Radially binned 3D power spectra of the fields
+  NN2 = {static_cast<size_t>(measure->getNFieldSpectra()), nbins};
+  fields_sk = std::make_unique<ntuple<2>>(NN2, "fields_Sk", file_id);
+  NN1 = {nbins};
+  fields_kbins = std::make_unique<ntuple<1>>(NN1, "fields_kbins", file_id);
+  fields_nshell = std::make_unique<ntuple<1>>(NN1, "fields_Nshell", file_id);
+  NN1 = {1};
+  fields_time = std::make_unique<ntuple<1>>(NN1, "fields_time", file_id);
 }
 
 measurer_output_fasthdf5::~measurer_output_fasthdf5() { H5Fclose(file_id); }
@@ -158,6 +167,22 @@ void measurer_output_fasthdf5::save_topcharge(const std::string &what) {
   topcharge_zero->row[0] = measure->topcharge_zero.real();
   topcharge_zero->row[1] = measure->topcharge_zero.imag();
   topcharge_zero->fill();
+}
+
+void measurer_output_fasthdf5::save_field_spectra(const std::string &what) {
+
+  // The bin centers and mode counts are time independent: write them once
+  if (!fields_static_written) {
+    fields_kbins->row = measure->topcharge_kbins;
+    fields_kbins->fill();
+    fields_nshell->row = measure->field_Nshell;
+    fields_nshell->fill();
+    fields_static_written = true;
+  }
+  fields_time->row[0] = measure->getModel()->data.atime.t();
+  fields_time->fill();
+  fields_sk->row = measure->field_Sk;
+  fields_sk->fill();
 }
 #endif
 

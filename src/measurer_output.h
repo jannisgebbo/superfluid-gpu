@@ -20,6 +20,7 @@ public:
   // Optional secondary outputs on their own save cadence. Backends that do not
   // implement them (e.g. the text backend) fall back to these no-op defaults.
   virtual void save_topcharge(const std::string &what) {}
+  virtual void save_field_spectra(const std::string &what) {}
 };
 
 ////////////////////////////////////////////////////////////////////////
@@ -52,6 +53,7 @@ public:
   //  Computes the contents of the data from measurer to the output file
   virtual void save(const std::string &what = "") override;
   virtual void save_topcharge(const std::string &what = "") override;
+  virtual void save_field_spectra(const std::string &what = "") override;
 
 private:
   Measurer *measure;
@@ -99,6 +101,15 @@ private:
   std::unique_ptr<ntuple<1>> topcharge_kbins;
   std::unique_ptr<ntuple<1>> topcharge_nshell;
   bool topcharge_static_written = false;
+
+  // Radially binned 3D power spectra of the fields (Measurer::field_Sk):
+  // fields_Sk is a time series of NFieldSpectra x nbins rows, fields_time the
+  // time of each row. The |k| bin centers and mode counts are written once.
+  std::unique_ptr<ntuple<2>> fields_sk;
+  std::unique_ptr<ntuple<1>> fields_time;
+  std::unique_ptr<ntuple<1>> fields_kbins;
+  std::unique_ptr<ntuple<1>> fields_nshell;
+  bool fields_static_written = false;
 };
 #endif
 #endif
