@@ -74,12 +74,17 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   topcharge_zero =
       std::make_unique<ntuple<1>>(NN1, "topcharge_zeromode", file_id);
 
-  // Radially binned 3D power spectra of the fields
-  NN2 = {static_cast<size_t>(measure->getNFieldSpectra()), nbins};
-  fields_sk = std::make_unique<ntuple<2>>(NN2, "fields_Sk", file_id);
-  NN1 = {nbins};
+  // Radially binned 3D spectra of the transverse fields pi_a and A_a.
+  const size_t nfb = static_cast<size_t>(measure->getNFieldBins());
+  NN1 = {nfb};
+  fields_Ppipi = std::make_unique<ntuple<1>>(NN1, "fields_Ppipi", file_id);
+  fields_PAA = std::make_unique<ntuple<1>>(NN1, "fields_PAA", file_id);
+  fields_ReC = std::make_unique<ntuple<1>>(NN1, "fields_ReC", file_id);
   fields_kbins = std::make_unique<ntuple<1>>(NN1, "fields_kbins", file_id);
   fields_nshell = std::make_unique<ntuple<1>>(NN1, "fields_Nshell", file_id);
+  NN1 = {nfb + 1};
+  fields_bin_edges =
+      std::make_unique<ntuple<1>>(NN1, "fields_bin_edges", file_id);
   NN1 = {1};
   fields_time = std::make_unique<ntuple<1>>(NN1, "fields_time", file_id);
 }
@@ -171,9 +176,11 @@ void measurer_output_fasthdf5::save_topcharge(const std::string &what) {
 
 void measurer_output_fasthdf5::save_field_spectra(const std::string &what) {
 
-  // The bin centers and mode counts are time independent: write them once
+  // The bin edges and static info are time independent: write them once
   if (!fields_static_written) {
-    fields_kbins->row = measure->topcharge_kbins;
+    fields_bin_edges->row = measure->field_bin_edges;
+    fields_bin_edges->fill();
+    fields_kbins->row = measure->field_kbins;
     fields_kbins->fill();
     fields_nshell->row = measure->field_Nshell;
     fields_nshell->fill();
@@ -181,8 +188,12 @@ void measurer_output_fasthdf5::save_field_spectra(const std::string &what) {
   }
   fields_time->row[0] = measure->getModel()->data.atime.t();
   fields_time->fill();
-  fields_sk->row = measure->field_Sk;
-  fields_sk->fill();
+  fields_Ppipi->row = measure->field_Ppipi;
+  fields_Ppipi->fill();
+  fields_PAA->row = measure->field_PAA;
+  fields_PAA->fill();
+  fields_ReC->row = measure->field_ReC;
+  fields_ReC->fill();
 }
 #endif
 

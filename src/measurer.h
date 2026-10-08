@@ -205,14 +205,26 @@ public:
   std::vector<double> topcharge_Nshell; // number of modes per shell
   std::complex<double> topcharge_zero{0., 0.}; // qtilde(k=0), DC component
 
-  // Spherically-averaged power spectra of the fields from the full 3D grid
-  // (see computeFieldSpectra in measurer.cxx), with the same |k| bins as the
-  // topological charge. field_Sk is NFieldSpectra x NtopchargeBins (row
-  // major): S_c(k) = <|U_c(k)|^2> per radial shell for U = (phi[4], A[3],
-  // V[3]), with U_c(k) = (1/N^3) \sum_x e^{-ikx} U_c(x).
-  static const PetscInt NFieldSpectra = ModelAData::Ndof;
-  std::vector<double> field_Sk;
-  std::vector<double> field_Nshell; // number of modes per shell
+  // Radially binned 3D power spectra of the transverse fields
+  //   pi_a(x) = phi_a - n_a (n_b phi_b)   and   A_a(x) = n_{ab}(x) n_b
+  // with n_a = <phi_a>/|<phi_a>|.  Uses hybrid linear/log binning: integer
+  // shells |m|=1..8 (linear), then 20 bins per decade up to k_Nyq.
+  // All quantities are traces over the internal index a.
+  // Convention: f(k) = (1/N^3) Σ_x e^{-ikx} f(x), matching wallX_k.
+  // The cross-spectrum C is real for real fields (Im part vanishes exactly).
+  int NFieldBins = 0;
+  std::vector<double> field_bin_edges; // NFieldBins+1 edges in |k|
+  std::vector<double> field_kbins;    // mean |k| per bin (from mode sum)
+  std::vector<double> field_Nshell;   // mode count per bin (full k-space weight)
+  std::vector<double> field_Ppipi;    // mean |pi(k)|^2 per bin, summed over a
+  std::vector<double> field_PAA;      // mean |A(k)|^2 per bin, summed over a
+  std::vector<double> field_ReC;      // mean Re[pi_a(k) A_a(k)*] per bin
+
+  // Precomputed per-mode bin index, weight, and |k| for the half-spectrum
+  // (size N*N*(N/2+1), built once in the constructor).
+  std::vector<int> field_bin_map;
+  std::vector<double> field_weight;
+  std::vector<double> field_kmag;
 
   // First dimension is NObs, last is spatial index x=0...N
   nvector<PetscScalar, 2> wallX;
@@ -298,12 +310,90 @@ public:
     for (int m = 0; m < NtopchargeBins; m++) {
       topcharge_kbins[m] = m * topcharge_dk;
     }
-    field_Sk.assign(NFieldSpectra * NtopchargeBins, 0.);
-    field_Nshell.assign(NtopchargeBins, 0.);
-    // The 3D FFT machinery is set up on first use (setupSpectra)
+    // Field-spectra hybrid linear/log bin edges (pure geometry, no FFT needed)
+    {
+      const double kf = 2.0 * M_PI / model->data.LX;
+      const double a_lat = model->data.LX / N;
+      const double kNyq = M_PI / a_lat;
+      const double ratio = pow(10.0, 1.0 / 20.0); // 20 bins per decade
+      const int mc = static_cast<int>(ceil(1.0 / (ratio - 1.0) - 0.5)); // = 8
+      // Linear part: edges at (j + 0.5) * kf
+      for (int j = 0; j <= mc; j++)
+        field_bin_edges.push_back((j + 0.5) * kf);
+      // Log part: multiply by ratio until kNyq
+      double edge = field_bin_edges.back() * ratio;
+      while (edge < kNyq) {
+        field_bin_edges.push_back(edge);
+        edge *= ratio;
+      }
+      field_bin_edges.push_back(kNyq);
+      // Merge final bin if narrower than half a log step
+      if (field_bin_edges.size() >= 3) {
+        const double last = field_bin_edges[field_bin_edges.size() - 1];
+        const double prev = field_bin_edges[field_bin_edges.size() - 2];
+        if (last / prev < sqrt(ratio))
+          field_bin_edges.erase(field_bin_edges.end() - 2);
+      }
+      NFieldBins = static_cast<int>(field_bin_edges.size()) - 1;
+      field_kbins.assign(NFieldBins, 0.0);
+      field_Nshell.assign(NFieldBins, 0.0);
+      field_Ppipi.assign(NFieldBins, 0.0);
+      field_PAA.assign(NFieldBins, 0.0);
+      field_ReC.assign(NFieldBins, 0.0);
+
+      // Precompute the bin index and weight for every mode in the half-spectrum.
+      // This avoids a binary search per mode inside the binning loop.
+      const int nxh = N / 2 + 1;
+      const size_t nhalf = static_cast<size_t>(N) * N * nxh;
+      field_bin_map.resize(nhalf);
+      field_weight.resize(nhalf);
+      field_kmag.resize(nhalf);
+      const int half = N / 2;
+      for (int kz = 0; kz < N; kz++) {
+        const int mz = (kz <= half) ? kz : kz - N;
+        for (int ky = 0; ky < N; ky++) {
+          const int my = (ky <= half) ? ky : ky - N;
+          for (int kx = 0; kx < nxh; kx++) {
+            const size_t idx =
+                (static_cast<size_t>(kz) * N + ky) * nxh + kx;
+            const double km =
+                kf * sqrt(static_cast<double>(kx * kx + my * my + mz * mz));
+            field_kmag[idx] = km;
+            // Binary search for bin
+            int b = -1;
+            if (km >= field_bin_edges[0] && km < field_bin_edges[NFieldBins]) {
+              int lo = 0, hi = NFieldBins;
+              while (hi - lo > 1) {
+                int mid = (lo + hi) / 2;
+                if (km >= field_bin_edges[mid]) lo = mid; else hi = mid;
+              }
+              b = lo;
+            }
+            field_bin_map[idx] = b;
+            field_weight[idx] = (kx > 0 && kx < half) ? 2.0 : 1.0;
+          }
+        }
+      }
+      // Precompute per-bin Nshell and mean |k| (these are time-independent)
+      for (size_t idx = 0; idx < nhalf; idx++) {
+        const int b = field_bin_map[idx];
+        if (b >= 0) {
+          field_Nshell[b] += field_weight[idx];
+          field_kbins[b] += field_weight[idx] * field_kmag[idx];
+        }
+      }
+      for (int b = 0; b < NFieldBins; b++) {
+        if (field_Nshell[b] > 0.0)
+          field_kbins[b] /= field_Nshell[b];
+      }
+    }
+    // The 3D FFT machinery is set up on first use (setupSpectra / setupFieldBins)
   }
 
   virtual ~Measurer() {
+#ifdef SFGPU_CUFFT
+    if (d_field_ft_buf) cudaFree(d_field_ft_buf);
+#endif
     VecScatterDestroy(&toZero);
     VecDestroy(&qseq);
     VecDestroy(&qnat);
@@ -335,14 +425,14 @@ public:
     computeTopChargeFourier(solution);
   }
 
-  // Computes field_Sk, the radially binned 3D power spectra of all field
-  // components. Collective, like measure_topcharge.
+  // Computes radially binned 3D power spectra of the transverse fields
+  // pi_a and A_a. Collective, like measure_topcharge.
   void measure_field_spectra(Vec *solution) { computeFieldSpectra(solution); }
 
   ModelA *getModel() { return model; }
   PetscInt getN() { return N; }
   int getNTopchargeBins() { return NtopchargeBins; }
-  int getNFieldSpectra() { return NFieldSpectra; }
+  int getNFieldBins() { return NFieldBins; }
   double getTopchargeDk() { return topcharge_dk; }
 
 private:
@@ -355,6 +445,14 @@ private:
   void computeDerivedObs();
   void computeTopChargeFourier(Vec *solution);
   void computeFieldSpectra(Vec *solution);
+  void setupFieldBins();
+
+  // Temporary host buffer for one half-spectrum (rank 0, used by
+  // computeFieldSpectra to hold pi_a(k) while computing A_a(k))
+  std::vector<std::complex<double>> field_ft_buf;
+#ifdef SFGPU_CUFFT
+  cufftDoubleComplex *d_field_ft_buf = nullptr;
+#endif
 
   // 3D spectra of a scalar field q(x). q lives in qglob, a global vector of
   // the 1-dof DMDA da1 with the same layout as the model's domain.

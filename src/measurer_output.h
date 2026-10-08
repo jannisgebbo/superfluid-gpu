@@ -102,13 +102,16 @@ private:
   std::unique_ptr<ntuple<1>> topcharge_nshell;
   bool topcharge_static_written = false;
 
-  // Radially binned 3D power spectra of the fields (Measurer::field_Sk):
-  // fields_Sk is a time series of NFieldSpectra x nbins rows, fields_time the
-  // time of each row. The |k| bin centers and mode counts are written once.
-  std::unique_ptr<ntuple<2>> fields_sk;
+  // Radially binned 3D spectra of the transverse fields pi_a and A_a.
+  // Per-bin power spectra and cross-spectrum, written each save.
+  // Bin edges, mean |k| and mode counts written once.
+  std::unique_ptr<ntuple<1>> fields_Ppipi;
+  std::unique_ptr<ntuple<1>> fields_PAA;
+  std::unique_ptr<ntuple<1>> fields_ReC;
   std::unique_ptr<ntuple<1>> fields_time;
   std::unique_ptr<ntuple<1>> fields_kbins;
   std::unique_ptr<ntuple<1>> fields_nshell;
+  std::unique_ptr<ntuple<1>> fields_bin_edges;
   bool fields_static_written = false;
 };
 #endif
