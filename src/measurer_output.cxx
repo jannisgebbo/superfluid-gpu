@@ -77,7 +77,7 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   // Radially binned 3D spectra of the transverse fields pi_a and A_a.
   const size_t nfb = static_cast<size_t>(measure->getNFieldBins());
   NN1 = {nfb};
-  fields_Ppipi = std::make_unique<ntuple<1>>(NN1, "fields_Ppipi", file_id);
+  fields_Pphi = std::make_unique<ntuple<1>>(NN1, "fields_Pphi", file_id);
   fields_PAA = std::make_unique<ntuple<1>>(NN1, "fields_PAA", file_id);
   fields_ReC = std::make_unique<ntuple<1>>(NN1, "fields_ReC", file_id);
   fields_kbins = std::make_unique<ntuple<1>>(NN1, "fields_kbins", file_id);
@@ -188,8 +188,8 @@ void measurer_output_fasthdf5::save_field_spectra(const std::string &what) {
   }
   fields_time->row[0] = measure->getModel()->data.atime.t();
   fields_time->fill();
-  fields_Ppipi->row = measure->field_Ppipi;
-  fields_Ppipi->fill();
+  fields_Pphi->row = measure->field_Pphi;
+  fields_Pphi->fill();
   fields_PAA->row = measure->field_PAA;
   fields_PAA->fill();
   fields_ReC->row = measure->field_ReC;

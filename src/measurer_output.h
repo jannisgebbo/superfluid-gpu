@@ -105,7 +105,7 @@ private:
   // Radially binned 3D spectra of the transverse fields pi_a and A_a.
   // Per-bin power spectra and cross-spectrum, written each save.
   // Bin edges, mean |k| and mode counts written once.
-  std::unique_ptr<ntuple<1>> fields_Ppipi;
+  std::unique_ptr<ntuple<1>> fields_Pphi;
   std::unique_ptr<ntuple<1>> fields_PAA;
   std::unique_ptr<ntuple<1>> fields_ReC;
   std::unique_ptr<ntuple<1>> fields_time;

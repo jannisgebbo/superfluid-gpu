@@ -869,13 +869,12 @@ static void field_binning_kokkos(const cufftDoubleComplex *ft_pi,
 #endif
 
 // -----------------------------------------------------------------------
-// GPU kernels for building pi_a(x) and A_a(x) in real space
+// GPU kernel for A_a(x) = contract_rho(n(x), rho(x))[a] with local
+// n_a(x) = phi_a(x)/|phi(x)|, matching computeSliceAveragePhase.
 // -----------------------------------------------------------------------
 #ifdef SFGPU_KOKKOS
-// pi_a(x) = phi_a(x) - n_a * (n . phi(x))
-static PetscErrorCode pi_component_kokkos(DM da, Vec U, PetscInt a,
-                                          const double *n_host, DM da1,
-                                          Vec q) {
+static PetscErrorCode Avec_component_local_kokkos(DM da, Vec U, PetscInt a,
+                                                  DM da1, Vec q) {
   PetscFunctionBeginUser;
   PetscInt xs, ys, zs, xm, ym, zm;
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
@@ -885,66 +884,38 @@ static PetscErrorCode pi_component_kokkos(DM da, Vec U, PetscInt a,
   SiteValueView qv;
   PetscCall(DMDAVecGetKokkosOffsetViewWrite(da1, q, &qv));
 
-  const double na = n_host[a];
-  const double n0 = n_host[0], n1 = n_host[1], n2 = n_host[2], n3 = n_host[3];
-  Kokkos::parallel_for(
-      "PiComponent",
-      SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
-      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
-        const double ndotphi = n0 * u(k, j, i, 0) + n1 * u(k, j, i, 1) +
-                               n2 * u(k, j, i, 2) + n3 * u(k, j, i, 3);
-        qv(k, j, i) = u(k, j, i, a) - na * ndotphi;
-      });
-  Kokkos::fence();
-
-  PetscCall(DMDAVecRestoreKokkosOffsetViewWrite(da1, q, &qv));
-  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, U, &u));
-  PetscFunctionReturn(PETSC_SUCCESS);
-}
-
-// A_a(x) = contract_rho(n, rho(x))[a]
-// rho is stored as (A[0..2], V[0..2]) at DOF offsets OffsetA..OffsetA+5.
-// contract_rho(n, rho) returns a 4-vector; we extract component a.
-static PetscErrorCode Avec_component_kokkos(DM da, Vec U, PetscInt a,
-                                            const double *n_host, DM da1,
-                                            Vec q) {
-  PetscFunctionBeginUser;
-  PetscInt xs, ys, zs, xm, ym, zm;
-  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
-
-  ConstNodeView u;
-  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, U, &u));
-  SiteValueView qv;
-  PetscCall(DMDAVecGetKokkosOffsetViewWrite(da1, q, &qv));
-
-  const double n0 = n_host[0], n1 = n_host[1], n2 = n_host[2], n3 = n_host[3];
   constexpr PetscInt oA = ModelAData::OffsetA;
+  constexpr PetscInt Nphi = ModelAData::Nphi;
   Kokkos::parallel_for(
-      "AvecComponent",
+      "AvecComponentLocal",
       SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
       KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
-        // rho = (rho01, rho02, rho03, rho12, rho13, rho23) stored as A[3],V[3]
-        const double r0 = u(k, j, i, oA + 0); // rho01
-        const double r1 = u(k, j, i, oA + 1); // rho02
-        const double r2 = u(k, j, i, oA + 2); // rho03
-        const double r3 = u(k, j, i, oA + 3); // rho12
-        const double r4 = u(k, j, i, oA + 4); // rho13
-        const double r5 = u(k, j, i, oA + 5); // rho23
-        // contract_rho(n, rho) written out per component
+        // Local unit vector n = phi/|phi|
+        double n[Nphi];
+        double phi2 = 0.0;
+        for (int l = 0; l < Nphi; l++) {
+          n[l] = u(k, j, i, l);
+          phi2 += n[l] * n[l];
+        }
+        if (phi2 > 100.0 * 2.2250738585072014e-308) { // ~numeric_limits<double>::min()
+          const double inv = 1.0 / sqrt(phi2);
+          for (int l = 0; l < Nphi; l++) n[l] *= inv;
+        } else {
+          n[0] = 1.0; n[1] = 0.0; n[2] = 0.0; n[3] = 0.0;
+        }
+        // rho stored as A[3],V[3] at offsets oA..oA+5
+        const double r0 = u(k, j, i, oA + 0);
+        const double r1 = u(k, j, i, oA + 1);
+        const double r2 = u(k, j, i, oA + 2);
+        const double r3 = u(k, j, i, oA + 3);
+        const double r4 = u(k, j, i, oA + 4);
+        const double r5 = u(k, j, i, oA + 5);
         double result;
         switch (a) {
-        case 0:
-          result = -(n1 * r0) - n2 * r1 - n3 * r2;
-          break;
-        case 1:
-          result = n0 * r0 + n3 * r4 - n2 * r5;
-          break;
-        case 2:
-          result = n0 * r1 - n3 * r3 + n1 * r5;
-          break;
-        default: // case 3
-          result = n0 * r2 + n2 * r3 - n1 * r4;
-          break;
+        case 0: result = -(n[1]*r0) - n[2]*r1 - n[3]*r2;  break;
+        case 1: result = n[0]*r0 + n[3]*r4 - n[2]*r5;     break;
+        case 2: result = n[0]*r1 - n[3]*r3 + n[1]*r5;     break;
+        default: result = n[0]*r2 + n[2]*r3 - n[1]*r4;    break;
         }
         qv(k, j, i) = result;
       });
@@ -957,32 +928,20 @@ static PetscErrorCode Avec_component_kokkos(DM da, Vec U, PetscInt a,
 #endif
 
 // -----------------------------------------------------------------------
-// computeFieldSpectra: transverse-field power spectra with hybrid binning
+// computeFieldSpectra: power spectra of phi_a and locally-rotated A_a
+// with hybrid linear/log binning.
+// phi_a(x) is the raw field component.
+// A_a(x) = contract_rho(n(x), rho(x))[a] with n(x) = phi(x)/|phi(x)|,
+// matching the local decomposition in computeSliceAveragePhase.
 // -----------------------------------------------------------------------
 void Measurer::computeFieldSpectra(Vec *solution) {
   setupFieldBins();
 
   DM &da = model->domain;
 
-  // 1. Compute n_a = <phi_a> / |<phi_a>|  (collective over all ranks)
-  double n_a[ModelAData::Nphi];
-  double norm2 = 0.0;
-  for (int a = 0; a < ModelAData::Nphi; a++) {
-    PetscScalar sum;
-    VecStrideSum(*solution, a, &sum);
-    n_a[a] = PetscRealPart(sum) / (static_cast<double>(N) * N * N);
-    norm2 += n_a[a] * n_a[a];
-  }
-  double norm = sqrt(norm2);
-  if (norm < 1e-30) {
-    n_a[0] = 1.0;
-    norm = 1.0;
-  }
-  for (int a = 0; a < ModelAData::Nphi; a++) n_a[a] /= norm;
-
-  // 2. Zero accumulators (kbins and Nshell are time-independent, set in ctor)
+  // 1. Zero accumulators (kbins and Nshell are time-independent, set in ctor)
   const int nb = NFieldBins;
-  std::fill(field_Ppipi.begin(), field_Ppipi.end(), 0.0);
+  std::fill(field_Pphi.begin(), field_Pphi.end(), 0.0);
   std::fill(field_PAA.begin(), field_PAA.end(), 0.0);
   std::fill(field_ReC.begin(), field_ReC.end(), 0.0);
 
@@ -993,13 +952,13 @@ void Measurer::computeFieldSpectra(Vec *solution) {
   PetscMPIInt rank;
   MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
 
-  // 3. Loop over components a = 0..Nphi-1
+  // 2. Loop over components a = 0..Nphi-1
   for (int a = 0; a < ModelAData::Nphi; a++) {
 
-    // --- Build pi_a(x) into qglob ---
+    // --- Copy phi_a(x) into qglob ---
 #ifdef SFGPU_KOKKOS
     if (is_kokkos_vec(*solution)) {
-      pi_component_kokkos(da, *solution, a, n_a, da1, qglob);
+      field_component_kokkos(da, *solution, a, da1, qglob);
     } else
 #endif
     {
@@ -1012,10 +971,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       for (PetscInt k = zs; k < zs + zm; k++) {
         for (PetscInt j = ys; j < ys + ym; j++) {
           for (PetscInt i = xs; i < xs + xm; i++) {
-            double ndotphi = 0.0;
-            for (int b = 0; b < ModelAData::Nphi; b++)
-              ndotphi += n_a[b] * u[k][j][i][b];
-            q[k][j][i] = u[k][j][i][a] - n_a[a] * ndotphi;
+            q[k][j][i] = u[k][j][i][a];
           }
         }
       }
@@ -1023,7 +979,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       DMDAVecRestoreArrayDOFRead(da, *solution, &u);
     }
 
-    // --- Gather pi_a to rank 0 and FFT; save result in buffer ---
+    // --- Gather phi_a to rank 0 and FFT; save result in buffer ---
     Vec qfull = qglob;
     if (toZero) {
       DMDAGlobalToNaturalBegin(da1, qglob, INSERT_VALUES, qnat);
@@ -1052,10 +1008,10 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       VecRestoreArrayReadAndMemType(qfull, &qdata);
     }
 
-    // --- Build A_a(x) into qglob ---
+    // --- Build A_a(x) = contract_rho(n(x), rho(x))[a] with local n(x) ---
 #ifdef SFGPU_KOKKOS
     if (is_kokkos_vec(*solution)) {
-      Avec_component_kokkos(da, *solution, a, n_a, da1, qglob);
+      Avec_component_local_kokkos(da, *solution, a, da1, qglob);
     } else
 #endif
     {
@@ -1068,6 +1024,19 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       for (PetscInt k = zs; k < zs + zm; k++) {
         for (PetscInt j = ys; j < ys + ym; j++) {
           for (PetscInt i = xs; i < xs + xm; i++) {
+            // Local unit vector n = phi/|phi|
+            double n[ModelAData::Nphi];
+            double phi2 = 0.0;
+            for (int l = 0; l < ModelAData::Nphi; l++) {
+              n[l] = u[k][j][i][l];
+              phi2 += n[l] * n[l];
+            }
+            if (phi2 > 100.0 * std::numeric_limits<double>::min()) {
+              const double inv = 1.0 / sqrt(phi2);
+              for (int l = 0; l < ModelAData::Nphi; l++) n[l] *= inv;
+            } else {
+              n[0] = 1.0; n[1] = 0.0; n[2] = 0.0; n[3] = 0.0;
+            }
             const double r0 = u[k][j][i][ModelAData::OffsetA + 0];
             const double r1 = u[k][j][i][ModelAData::OffsetA + 1];
             const double r2 = u[k][j][i][ModelAData::OffsetA + 2];
@@ -1076,18 +1045,10 @@ void Measurer::computeFieldSpectra(Vec *solution) {
             const double r5 = u[k][j][i][ModelAData::OffsetA + 5];
             double result;
             switch (a) {
-            case 0:
-              result = -(n_a[1] * r0) - n_a[2] * r1 - n_a[3] * r2;
-              break;
-            case 1:
-              result = n_a[0] * r0 + n_a[3] * r4 - n_a[2] * r5;
-              break;
-            case 2:
-              result = n_a[0] * r1 - n_a[3] * r3 + n_a[1] * r5;
-              break;
-            default:
-              result = n_a[0] * r2 + n_a[2] * r3 - n_a[1] * r4;
-              break;
+            case 0: result = -(n[1]*r0) - n[2]*r1 - n[3]*r2;  break;
+            case 1: result = n[0]*r0 + n[3]*r4 - n[2]*r5;     break;
+            case 2: result = n[0]*r1 - n[3]*r3 + n[1]*r5;     break;
+            default: result = n[0]*r2 + n[2]*r3 - n[1]*r4;    break;
             }
             q[k][j][i] = result;
           }
@@ -1137,7 +1098,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
           auto PAA_h = Kokkos::create_mirror_view(PAA_d);
           auto ReC_h = Kokkos::create_mirror_view(ReC_d);
           for (int b = 0; b < nb; b++) {
-            Ppipi_h(b) = field_Ppipi[b];
+            Ppipi_h(b) = field_Pphi[b];
             PAA_h(b) = field_PAA[b];
             ReC_h(b) = field_ReC[b];
           }
@@ -1156,7 +1117,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
         auto ReC_h2 =
             Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ReC_d);
         for (int b = 0; b < nb; b++) {
-          field_Ppipi[b] = Ppipi_h2(b);
+          field_Pphi[b] = Ppipi_h2(b);
           field_PAA[b] = PAA_h2(b);
           field_ReC[b] = ReC_h2(b);
         }
@@ -1167,7 +1128,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
         const std::complex<double> *ft_A = fftw3d->execute_host(qdata);
         field_binning_host(field_ft_buf.data(), ft_A, nmodes, scale,
                            field_bin_map.data(), field_weight.data(),
-                           field_Ppipi.data(), field_PAA.data(),
+                           field_Pphi.data(), field_PAA.data(),
                            field_ReC.data());
       }
       VecRestoreArrayReadAndMemType(qfull, &qdata);
@@ -1181,7 +1142,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
     for (int b = 0; b < nb; b++) {
       const double Nb = field_Nshell[b] * ModelAData::Nphi;
       if (Nb > 0.0) {
-        field_Ppipi[b] /= Nb;
+        field_Pphi[b] /= Nb;
         field_PAA[b] /= Nb;
         field_ReC[b] /= Nb;
       }

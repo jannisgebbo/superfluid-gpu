@@ -205,20 +205,19 @@ public:
   std::vector<double> topcharge_Nshell; // number of modes per shell
   std::complex<double> topcharge_zero{0., 0.}; // qtilde(k=0), DC component
 
-  // Radially binned 3D power spectra of the transverse fields
-  //   pi_a(x) = phi_a - n_a (n_b phi_b)   and   A_a(x) = n_{ab}(x) n_b
-  // with n_a = <phi_a>/|<phi_a>|.  Uses hybrid linear/log binning: integer
-  // shells |m|=1..8 (linear), then 20 bins per decade up to k_Nyq.
+  // Radially binned 3D power spectra of phi_a(x) and the locally-rotated
+  // A_a(x) = contract_rho(n(x), rho(x))[a] with n(x) = phi(x)/|phi(x)|,
+  // matching computeSliceAveragePhase.  Uses hybrid linear/log binning:
+  // integer shells |m|=1..8 (linear), then 20 bins per decade up to k_Nyq.
   // All quantities are traces over the internal index a.
   // Convention: f(k) = (1/N^3) Σ_x e^{-ikx} f(x), matching wallX_k.
-  // The cross-spectrum C is real for real fields (Im part vanishes exactly).
   int NFieldBins = 0;
   std::vector<double> field_bin_edges; // NFieldBins+1 edges in |k|
   std::vector<double> field_kbins;    // mean |k| per bin (from mode sum)
   std::vector<double> field_Nshell;   // mode count per bin (full k-space weight)
-  std::vector<double> field_Ppipi;    // mean |pi(k)|^2 per bin, summed over a
+  std::vector<double> field_Pphi;     // mean |phi(k)|^2 per bin, summed over a
   std::vector<double> field_PAA;      // mean |A(k)|^2 per bin, summed over a
-  std::vector<double> field_ReC;      // mean Re[pi_a(k) A_a(k)*] per bin
+  std::vector<double> field_ReC;      // mean Re[phi_a(k) A_a(k)*] per bin
 
   // Precomputed per-mode bin index, weight, and |k| for the half-spectrum
   // (size N*N*(N/2+1), built once in the constructor).
@@ -337,7 +336,7 @@ public:
       NFieldBins = static_cast<int>(field_bin_edges.size()) - 1;
       field_kbins.assign(NFieldBins, 0.0);
       field_Nshell.assign(NFieldBins, 0.0);
-      field_Ppipi.assign(NFieldBins, 0.0);
+      field_Pphi.assign(NFieldBins, 0.0);
       field_PAA.assign(NFieldBins, 0.0);
       field_ReC.assign(NFieldBins, 0.0);
 
