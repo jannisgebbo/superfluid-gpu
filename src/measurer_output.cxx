@@ -87,6 +87,19 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
       std::make_unique<ntuple<1>>(NN1, "fields_bin_edges", file_id);
   NN1 = {1};
   fields_time = std::make_unique<ntuple<1>>(NN1, "fields_time", file_id);
+
+  // Coarsening output (same bins as field spectra)
+  NN1 = {nfb};
+  coarsen_Pphi = std::make_unique<ntuple<1>>(NN1, "coarsen_Pphi", file_id);
+  coarsen_PAA = std::make_unique<ntuple<1>>(NN1, "coarsen_PAA", file_id);
+  coarsen_ReC = std::make_unique<ntuple<1>>(NN1, "coarsen_ReC", file_id);
+  coarsen_kbins = std::make_unique<ntuple<1>>(NN1, "coarsen_kbins", file_id);
+  coarsen_nshell = std::make_unique<ntuple<1>>(NN1, "coarsen_Nshell", file_id);
+  NN1 = {nfb + 1};
+  coarsen_bin_edges =
+      std::make_unique<ntuple<1>>(NN1, "coarsen_bin_edges", file_id);
+  NN1 = {1};
+  coarsen_step = std::make_unique<ntuple<1>>(NN1, "coarsen_step", file_id);
 }
 
 measurer_output_fasthdf5::~measurer_output_fasthdf5() { H5Fclose(file_id); }
@@ -194,6 +207,29 @@ void measurer_output_fasthdf5::save_field_spectra(const std::string &what) {
   fields_PAA->fill();
   fields_ReC->row = measure->field_ReC;
   fields_ReC->fill();
+}
+
+void measurer_output_fasthdf5::save_coarsening(const std::string &what) {
+  if (!coarsen_static_written) {
+    coarsen_bin_edges->row = measure->field_bin_edges;
+    coarsen_bin_edges->fill();
+    coarsen_kbins->row = measure->field_kbins;
+    coarsen_kbins->fill();
+    coarsen_nshell->row = measure->field_Nshell;
+    coarsen_nshell->fill();
+    coarsen_static_written = true;
+  }
+  coarsen_Pphi->row = measure->field_Pphi;
+  coarsen_Pphi->fill();
+  coarsen_PAA->row = measure->field_PAA;
+  coarsen_PAA->fill();
+  coarsen_ReC->row = measure->field_ReC;
+  coarsen_ReC->fill();
+}
+
+void measurer_output_fasthdf5::save_coarsening_step(int step_index) {
+  coarsen_step->row[0] = static_cast<double>(step_index);
+  coarsen_step->fill();
 }
 #endif
 

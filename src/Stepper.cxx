@@ -472,6 +472,82 @@ PetscErrorCode ghost_fill_periodic_kokkos(DM da, Vec global, Vec local,
 }
 #endif
 
+bool ModelGExplicitDiffusionStep::step_on(const double &dt, Vec &vec) {
+
+  auto &data = model->data;
+  DM da = model->domain;
+  Vec localU;
+  PetscCall(DMGetLocalVector(da, &localU));
+  PetscCall(ghost_exchange(da, vec, localU));
+
+  const auto &coeff = data.acoefficients;
+  const PetscReal H[4] = {coeff.H * coeff.sigmabyf(data.atime.t()), 0., 0.,
+                          0.};
+  const PetscReal axx = pow(1. / data.hX(), 2);
+  const PetscReal ayy = pow(1. / data.hY(), 2);
+  const PetscReal azz = pow(1. / data.hZ(), 2);
+  PetscReal dtG = dt * coeff.Gamma();
+  PetscReal dtD = dt * coeff.D();
+  PetscReal f = sqrt(data.f2());
+
+  PetscInt xstart, ystart, zstart, xdimension, ydimension, zdimension;
+  DMDAGetCorners(da, &xstart, &ystart, &zstart, &xdimension, &ydimension,
+                 &zdimension);
+
+#ifdef SFGPU_KOKKOS
+  if (use_kokkos) {
+    PetscCall(diffusion_stencil_kokkos(da, localU, vec, H, axx, ayy, azz,
+                                       dtG, dtD, f));
+  } else
+#endif
+  {
+    G_node ***phi;
+    PetscCall(DMDAVecGetArrayRead(da, localU, &phi));
+    G_node ***phinew;
+    PetscCall(DMDAVecGetArray(da, vec, &phinew));
+    for (PetscInt k = zstart; k < zstart + zdimension; k++) {
+      for (PetscInt j = ystart; j < ystart + ydimension; j++) {
+        for (PetscInt i = xstart; i < xstart + xdimension; i++) {
+          G_node &centralPhi = phi[k][j][i];
+          G_node &phixplus = phi[k][j][i + 1];
+          G_node &phixminus = phi[k][j][i - 1];
+          G_node &phiyplus = phi[k][j + 1][i];
+          G_node &phiyminus = phi[k][j - 1][i];
+          G_node &phizplus = phi[k + 1][j][i];
+          G_node &phizminus = phi[k - 1][j][i];
+          for (PetscInt l = 0; l < ModelAData::Nphi; l++) {
+            phinew[k][j][i].f[l] +=
+                dtG * (axx * (phixplus.f[l] + phixminus.f[l]) +
+                       ayy * (phiyplus.f[l] + phiyminus.f[l]) +
+                       azz * (phizplus.f[l] + phizminus.f[l]) -
+                       2. * (axx + ayy + azz) * centralPhi.f[l]);
+            phinew[k][j][i].f[l] += dtG * H[l];
+          }
+          G_node::normalize_phi(phinew[k][j][i].f, f);
+          for (PetscInt l = 0; l < ModelAData::NA; l++) {
+            phinew[k][j][i].A[l] +=
+                dtD * (axx * (phixplus.A[l] + phixminus.A[l]) +
+                       ayy * (phiyplus.A[l] + phiyminus.A[l]) +
+                       azz * (phizplus.A[l] + phizminus.A[l]) -
+                       2. * (axx + ayy + azz) * centralPhi.A[l]);
+          }
+          for (PetscInt l = 0; l < ModelAData::NV; l++) {
+            phinew[k][j][i].V[l] +=
+                dtD * (axx * (phixplus.V[l] + phixminus.V[l]) +
+                       ayy * (phiyplus.V[l] + phiyminus.V[l]) +
+                       azz * (phizplus.V[l] + phizminus.V[l]) -
+                       2. * (axx + ayy + azz) * centralPhi.V[l]);
+          }
+        }
+      }
+    }
+    PetscCall(DMDAVecRestoreArray(da, vec, &phinew));
+    PetscCall(DMDAVecRestoreArrayRead(da, localU, &phi));
+  }
+  PetscCall(DMRestoreLocalVector(da, &localU));
+  return true;
+}
+
 bool ModelGExplicitDiffusionStep::step(const double &dt) {
 
   auto &data = model->data;

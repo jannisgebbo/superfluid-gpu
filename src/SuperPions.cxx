@@ -102,6 +102,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
   }
 
   // Start the loop
+  bool coarsening_done = false;
   const double tiny = 1.e-10;
   while (atime.t() < atime.tfinal() - tiny) {
 
@@ -146,6 +147,38 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       }
       PetscLogEventEnd(measurements, 0, 0, 0, 0);
       PetscLogStagePop();
+    }
+
+    // One-shot coarsening: at the specified time, duplicate the solution,
+    // apply pure diffusion, and measure field spectra at regular intervals.
+    if (ahandler.time_start_coarsening >= 0 &&
+        !coarsening_done &&
+        atime.t() >= ahandler.time_start_coarsening) {
+      coarsening_done = true;
+      PetscPrintf(PETSC_COMM_WORLD,
+                  "Coarsening: starting at t = %g, %d diffusion steps, "
+                  "measuring every %d steps\n",
+                  (double)atime.t(), ahandler.timesteps_coarsening,
+                  ahandler.saveCoarseningFrequency);
+
+      Vec sol_coarse;
+      VecDuplicate(model->solution, &sol_coarse);
+      VecCopy(model->solution, sol_coarse);
+      ModelGExplicitDiffusionStep diffuser(*model);
+
+      for (int cs_step = 1; cs_step <= ahandler.timesteps_coarsening;
+           cs_step++) {
+        diffuser.step_on(atime.dt(), sol_coarse);
+        if (cs_step % ahandler.saveCoarseningFrequency == 0) {
+          measurer.measure_field_spectra(&sol_coarse);
+          if (rank == 0) {
+            measurer_output->save_coarsening();
+            measurer_output->save_coarsening_step(cs_step);
+          }
+        }
+      }
+      VecDestroy(&sol_coarse);
+      PetscPrintf(PETSC_COMM_WORLD, "Coarsening: done\n");
     }
 
     // Write the solution to tape if writeFrequency > 0. This is used for

@@ -124,6 +124,13 @@ struct ModelAHandlerData {
   int writeFrequency = -1;
   bool compute_energy = false;
 
+  // Coarsening: at time_start_coarsening, duplicate the solution, apply pure
+  // diffusion for timesteps_coarsening steps, and measure field spectra every
+  // saveCoarseningFrequency diffusion steps.  Disabled when < 0.
+  double time_start_coarsening = -1.0;
+  int saveCoarseningFrequency = 1;
+  int timesteps_coarsening = 10;
+
   bool eventmode = false;
   int nevents = 1;
   int current_event = 0;
@@ -139,6 +146,16 @@ struct ModelAHandlerData {
         params.value("saveFrequencyFields", saveFrequencyFields);
     writeFrequency = params.value("writeFrequency", writeFrequency);
     compute_energy = params.value("compute_energy", compute_energy);
+
+    if (params.contains("coarsening_settings")) {
+      auto &cs = params["coarsening_settings"];
+      time_start_coarsening =
+          cs.value("time_start_coarsening", time_start_coarsening);
+      saveCoarseningFrequency =
+          cs.value("saveCoarseningFrequency", saveCoarseningFrequency);
+      timesteps_coarsening =
+          cs.value("timesteps_coarsening", timesteps_coarsening);
+    }
 
     eventmode = params.value("eventmode", eventmode);
     nevents = params.value("nevents", nevents);
@@ -158,6 +175,10 @@ struct ModelAHandlerData {
     PetscPrintf(PETSC_COMM_WORLD, "compute_energy = %s\n",
                 (compute_energy ? "true" : "false"));
 
+    PetscPrintf(PETSC_COMM_WORLD, "coarsening: time_start = %g, "
+                "saveFrequency = %d, timesteps = %d\n",
+                time_start_coarsening, saveCoarseningFrequency,
+                timesteps_coarsening);
     PetscPrintf(PETSC_COMM_WORLD, "eventmode = %s\n",
                 (eventmode ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "nevents = %d\n", nevents);

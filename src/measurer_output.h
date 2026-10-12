@@ -21,6 +21,7 @@ public:
   // implement them (e.g. the text backend) fall back to these no-op defaults.
   virtual void save_topcharge(const std::string &what) {}
   virtual void save_field_spectra(const std::string &what) {}
+  virtual void save_coarsening(const std::string &what) {}
 };
 
 ////////////////////////////////////////////////////////////////////////
@@ -54,6 +55,8 @@ public:
   virtual void save(const std::string &what = "") override;
   virtual void save_topcharge(const std::string &what = "") override;
   virtual void save_field_spectra(const std::string &what = "") override;
+  virtual void save_coarsening(const std::string &what = "") override;
+  void save_coarsening_step(int step_index);
 
 private:
   Measurer *measure;
@@ -113,6 +116,17 @@ private:
   std::unique_ptr<ntuple<1>> fields_nshell;
   std::unique_ptr<ntuple<1>> fields_bin_edges;
   bool fields_static_written = false;
+
+  // Coarsening: same format as field spectra, separate datasets.
+  // Also records the diffusion step index.
+  std::unique_ptr<ntuple<1>> coarsen_Pphi;
+  std::unique_ptr<ntuple<1>> coarsen_PAA;
+  std::unique_ptr<ntuple<1>> coarsen_ReC;
+  std::unique_ptr<ntuple<1>> coarsen_step; // diffusion step number
+  std::unique_ptr<ntuple<1>> coarsen_kbins;
+  std::unique_ptr<ntuple<1>> coarsen_nshell;
+  std::unique_ptr<ntuple<1>> coarsen_bin_edges;
+  bool coarsen_static_written = false;
 };
 #endif
 #endif

@@ -46,6 +46,8 @@ class ModelGExplicitDiffusionStep : public Stepper {
 public:
   ModelGExplicitDiffusionStep(ModelA &in);
   bool step(const double &dt) override;
+  // Diffusion step on an external vector (does not touch model->solution)
+  bool step_on(const double &dt, Vec &vec);
   void finalize() override { ; }
   ~ModelGExplicitDiffusionStep() { ; }
 
