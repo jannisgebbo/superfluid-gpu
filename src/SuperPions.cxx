@@ -159,7 +159,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
                   "Coarsening: starting at t = %g, %d diffusion steps, "
                   "measuring every %d steps\n",
                   (double)atime.t(), ahandler.timesteps_coarsening,
-                  ahandler.saveCoarseningFrequency);
+                  ahandler.saveFrequencyCoarsening);
 
       Vec sol_coarse;
       VecDuplicate(model->solution, &sol_coarse);
@@ -169,7 +169,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       for (int cs_step = 1; cs_step <= ahandler.timesteps_coarsening;
            cs_step++) {
         diffuser.step_on(atime.dt(), sol_coarse);
-        if (cs_step % ahandler.saveCoarseningFrequency == 0) {
+        if (cs_step % ahandler.saveFrequencyCoarsening == 0) {
           measurer.measure_field_spectra(&sol_coarse);
           if (rank == 0) {
             measurer_output->save_coarsening();
