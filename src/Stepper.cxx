@@ -339,7 +339,8 @@ ModelGExplicitDiffusionStep::ModelGExplicitDiffusionStep(ModelA &in)
 // only written: one pass over the field less than phinew += ...
 static PetscErrorCode diffusion_stencil_kokkos(
     DM da, Vec localU, Vec solution, const PetscReal (&Hin)[4], PetscReal axx,
-    PetscReal ayy, PetscReal azz, PetscReal dtG, PetscReal dtD, PetscReal f) {
+    PetscReal ayy, PetscReal azz, PetscReal dtG, PetscReal dtD, PetscReal f,
+    bool preserve_norm) {
   PetscFunctionBeginUser;
   PetscInt xs, ys, zs, xm, ym, zm;
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
@@ -367,17 +368,19 @@ static PetscErrorCode diffusion_stencil_kokkos(
           p[l] += dtG * H[l];
         }
         // Normalize phi to f (same as G_node::normalize_phi)
-        PetscReal norm = 0.;
-        for (PetscInt l = 0; l < Nphi; l++) {
-          norm += p[l] * p[l];
-        }
-        if (norm > tiny) {
-          norm = Kokkos::sqrt(norm);
+        if (preserve_norm) {
+          PetscReal norm = 0.;
           for (PetscInt l = 0; l < Nphi; l++) {
-            p[l] *= f / norm;
+            norm += p[l] * p[l];
           }
-        } else {
-          p[0] = f;
+          if (norm > tiny) {
+            norm = Kokkos::sqrt(norm);
+            for (PetscInt l = 0; l < Nphi; l++) {
+              p[l] *= f / norm;
+            }
+          } else {
+            p[0] = f;
+          }
         }
         for (PetscInt l = 0; l < Nphi; l++) {
           phinew(k, j, i, l) = p[l];
@@ -472,7 +475,8 @@ PetscErrorCode ghost_fill_periodic_kokkos(DM da, Vec global, Vec local,
 }
 #endif
 
-bool ModelGExplicitDiffusionStep::step_on(const double &dt, Vec &vec) {
+bool ModelGExplicitDiffusionStep::step_on(const double &dt, Vec &vec,
+                                          bool preserve_norm) {
 
   auto &data = model->data;
   DM da = model->domain;
@@ -497,7 +501,7 @@ bool ModelGExplicitDiffusionStep::step_on(const double &dt, Vec &vec) {
 #ifdef SFGPU_KOKKOS
   if (use_kokkos) {
     PetscCall(diffusion_stencil_kokkos(da, localU, vec, H, axx, ayy, azz,
-                                       dtG, dtD, f));
+                                       dtG, dtD, f, preserve_norm));
   } else
 #endif
   {
@@ -523,7 +527,9 @@ bool ModelGExplicitDiffusionStep::step_on(const double &dt, Vec &vec) {
                        2. * (axx + ayy + azz) * centralPhi.f[l]);
             phinew[k][j][i].f[l] += dtG * H[l];
           }
-          G_node::normalize_phi(phinew[k][j][i].f, f);
+          if (preserve_norm) {
+            G_node::normalize_phi(phinew[k][j][i].f, f);
+          }
           for (PetscInt l = 0; l < ModelAData::NA; l++) {
             phinew[k][j][i].A[l] +=
                 dtD * (axx * (phixplus.A[l] + phixminus.A[l]) +
@@ -581,7 +587,7 @@ bool ModelGExplicitDiffusionStep::step(const double &dt) {
 #ifdef SFGPU_KOKKOS
   if (use_kokkos) {
     PetscCall(diffusion_stencil_kokkos(da, localU, model->solution, H, axx,
-                                       ayy, azz, dtG, dtD, f));
+                                       ayy, azz, dtG, dtD, f, true));
   } else
 #endif
   {

@@ -157,9 +157,12 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       coarsening_done = true;
       PetscPrintf(PETSC_COMM_WORLD,
                   "Coarsening: starting at t = %g, %d diffusion steps, "
-                  "measuring every %d steps\n",
+                  "measuring every %d steps, %s\n",
                   (double)atime.t(), ahandler.timesteps_coarsening,
-                  ahandler.saveFrequencyCoarsening);
+                  ahandler.saveFrequencyCoarsening,
+                  ahandler.preserve_norm_coarsening
+                      ? "on the sphere (|phi| = f)"
+                      : "simple dissipation (|phi| free)");
 
       Vec sol_coarse;
       VecDuplicate(model->solution, &sol_coarse);
@@ -168,7 +171,8 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
 
       for (int cs_step = 1; cs_step <= ahandler.timesteps_coarsening;
            cs_step++) {
-        diffuser.step_on(atime.dt(), sol_coarse);
+        diffuser.step_on(atime.dt(), sol_coarse,
+                         ahandler.preserve_norm_coarsening);
         if (cs_step % ahandler.saveFrequencyCoarsening == 0) {
           measurer.measure_field_spectra(&sol_coarse);
           if (rank == 0) {
