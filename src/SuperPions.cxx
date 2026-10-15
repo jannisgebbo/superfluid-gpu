@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -155,10 +156,20 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
         !coarsening_done &&
         atime.t() >= ahandler.time_start_coarsening) {
       coarsening_done = true;
+      // Each coarsening step of length dt is split into as many diffusion
+      // substeps as the time evolution uses ('B' in step_sequence), so the
+      // diffusion is as accurate as in the evolution (dt*Gamma/nsub < 1/12,
+      // no high-k mode changes sign)
+      const std::string step_sequence =
+          inputs["SuperSplitStep"].value<std::string>("step_sequence",
+                                                      "ABBBBBB");
+      const int nsub = std::max(
+          1, static_cast<int>(std::count(step_sequence.begin(),
+                                         step_sequence.end(), 'B')));
       PetscPrintf(PETSC_COMM_WORLD,
-                  "Coarsening: starting at t = %g, %d diffusion steps, "
-                  "measuring every %d steps, %s\n",
-                  (double)atime.t(), ahandler.timesteps_coarsening,
+                  "Coarsening: starting at t = %g, %d diffusion steps of "
+                  "%d substeps, measuring every %d steps, %s\n",
+                  (double)atime.t(), ahandler.timesteps_coarsening, nsub,
                   ahandler.saveFrequencyCoarsening,
                   ahandler.preserve_norm_coarsening
                       ? "on the sphere (|phi| = f)"
@@ -171,8 +182,10 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
 
       for (int cs_step = 1; cs_step <= ahandler.timesteps_coarsening;
            cs_step++) {
-        diffuser.step_on(atime.dt(), sol_coarse,
-                         ahandler.preserve_norm_coarsening);
+        for (int isub = 0; isub < nsub; isub++) {
+          diffuser.step_on(atime.dt() / nsub, sol_coarse,
+                           ahandler.preserve_norm_coarsening);
+        }
         if (cs_step % ahandler.saveFrequencyCoarsening == 0) {
           measurer.measure_field_spectra(&sol_coarse);
           if (rank == 0) {

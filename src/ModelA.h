@@ -125,8 +125,10 @@ struct ModelAHandlerData {
   bool compute_energy = false;
 
   // Coarsening: at time_start_coarsening, duplicate the solution, apply pure
-  // diffusion for timesteps_coarsening steps, and measure field spectra every
-  // saveFrequencyCoarsening diffusion steps.  Disabled when < 0.
+  // diffusion for timesteps_coarsening steps of length dt (each split into
+  // the same number of substeps as the 'B' steps of the evolution), and
+  // measure field spectra every saveFrequencyCoarsening steps.  Disabled
+  // when < 0.
   // preserve_norm_coarsening: true renormalizes phi to |phi| = f after every
   // diffusion step (dissipation on the sphere), false lets |phi| relax freely
   // (simple dissipation).
