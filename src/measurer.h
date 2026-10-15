@@ -207,8 +207,8 @@ public:
 
   // Radially binned 3D power spectra of phi_a(x) and the locally-rotated
   // A_a(x) = contract_rho(n(x), rho(x))[a] with n(x) = phi(x)/|phi(x)|,
-  // matching computeSliceAveragePhase.  Uses hybrid linear/log binning:
-  // integer shells |m|=1..8 (linear), then 20 bins per decade up to k_Nyq.
+  // matching computeSliceAveragePhase.  Uses hybrid exact/log binning: one
+  // bin per lattice shell |n|^2 = 1..10, then 20 bins per decade up to k_Nyq.
   // All quantities are traces over the internal index a.
   // Convention: f(k) = (1/N^3) Σ_x e^{-ikx} f(x), matching wallX_k.
   int NFieldBins = 0;
@@ -309,16 +309,20 @@ public:
     for (int m = 0; m < NtopchargeBins; m++) {
       topcharge_kbins[m] = m * topcharge_dk;
     }
-    // Field-spectra hybrid linear/log bin edges (pure geometry, no FFT needed)
+    // Field-spectra hybrid exact/log bin edges (pure geometry, no FFT needed)
     {
       const double kf = 2.0 * M_PI / model->data.LX;
       const double a_lat = model->data.LX / N;
       const double kNyq = M_PI / a_lat;
       const double ratio = pow(10.0, 1.0 / 20.0); // 20 bins per decade
-      const int mc = static_cast<int>(ceil(1.0 / (ratio - 1.0) - 0.5)); // = 8
-      // Linear part: edges at (j + 0.5) * kf
-      for (int j = 0; j <= mc; j++)
-        field_bin_edges.push_back((j + 0.5) * kf);
+      // Exact part: one bin per lattice shell |n|^2 = 1..10 (7 is not a sum
+      // of three squares). Since |n|^2 is an integer, the edge
+      // sqrt(|n|^2 + 0.5)*kf lies strictly between neighbouring shells. The
+      // first edge 0.5*kf excludes k = 0.
+      const int exact_n2[] = {1, 2, 3, 4, 5, 6, 8, 9, 10};
+      field_bin_edges.push_back(0.5 * kf);
+      for (int n2 : exact_n2)
+        field_bin_edges.push_back(sqrt(n2 + 0.5) * kf);
       // Log part: multiply by ratio until kNyq
       double edge = field_bin_edges.back() * ratio;
       while (edge < kNyq) {

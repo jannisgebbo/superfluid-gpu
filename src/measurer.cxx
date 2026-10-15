@@ -799,7 +799,7 @@ void Measurer::computeTopChargeFourier(Vec *solution) {
 }
 
 // -----------------------------------------------------------------------
-// Hybrid linear/log binning for the field spectra
+// Hybrid exact/log binning for the field spectra
 // -----------------------------------------------------------------------
 
 // Allocate the FFT buffer for the field spectra (bin edges are set up in the
@@ -929,7 +929,7 @@ static PetscErrorCode Avec_component_local_kokkos(DM da, Vec U, PetscInt a,
 
 // -----------------------------------------------------------------------
 // computeFieldSpectra: power spectra of phi_a and locally-rotated A_a
-// with hybrid linear/log binning.
+// with hybrid exact/log binning.
 // phi_a(x) is the raw field component.
 // A_a(x) = contract_rho(n(x), rho(x))[a] with n(x) = phi(x)/|phi(x)|,
 // matching the local decomposition in computeSliceAveragePhase.
