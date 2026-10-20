@@ -1159,6 +1159,299 @@ void Measurer::computeFieldSpectra(Vec *solution) {
 // as well as the axial vector density  A_a = rho_{ab} n_b and
 // corresponding vector density V_a. Finally phi2 is also
 // stored in this structure
+// -----------------------------------------------------------------------
+// Analytical coarsening for simple dissipation (preserve_norm = false), see
+// Measurer::setupAnalyticalCoarsening
+// -----------------------------------------------------------------------
+
+// Eigenvalues (2 - 2 cos(2 pi m / N)) / h^2, m = 0..N-1, of the 3-point
+// second difference along one axis, as in the diffusion stencil
+static std::vector<double> laplacian_1d(PetscInt N, double h) {
+  std::vector<double> lam(N);
+  for (PetscInt m = 0; m < N; m++) {
+    lam[m] = (2. - 2. * cos(2. * M_PI * static_cast<double>(m) / N)) / (h * h);
+  }
+  return lam;
+}
+
+// work = (ft(k) exp(-coef_tau lambda(k)) + zero_shift [k = 0]) * inv_ntot on
+// the half spectrum, idx = (kz * N + ky) * (N/2+1) + kx. Host version.
+static void decay_spectrum_host(const std::complex<double> *ft,
+                                std::complex<double> *work, PetscInt N,
+                                const std::vector<double> &lx,
+                                const std::vector<double> &ly,
+                                const std::vector<double> &lz,
+                                double coef_tau, double zero_shift,
+                                double inv_ntot) {
+  const PetscInt nxh = N / 2 + 1;
+  for (PetscInt kz = 0; kz < N; kz++) {
+    for (PetscInt ky = 0; ky < N; ky++) {
+      for (PetscInt kx = 0; kx < nxh; kx++) {
+        const size_t idx = (static_cast<size_t>(kz) * N + ky) * nxh + kx;
+        const double f = exp(-coef_tau * (lx[kx] + ly[ky] + lz[kz]));
+        work[idx] = ft[idx] * (f * inv_ntot);
+      }
+    }
+  }
+  work[0] += zero_shift * inv_ntot;
+}
+
+#ifdef SFGPU_CUFFT
+// Device version of decay_spectrum_host. A free function because nvcc does
+// not allow lambdas in private member functions.
+static void decay_spectrum_kokkos(const cufftDoubleComplex *ft,
+                                  cufftDoubleComplex *work, PetscInt N,
+                                  const std::vector<double> &lx_h,
+                                  const std::vector<double> &ly_h,
+                                  const std::vector<double> &lz_h,
+                                  double coef_tau, double zero_shift,
+                                  double inv_ntot) {
+  Kokkos::View<double *> lx("lx", N), ly("ly", N), lz("lz", N);
+  {
+    auto hx = Kokkos::create_mirror_view(lx);
+    auto hy = Kokkos::create_mirror_view(ly);
+    auto hz = Kokkos::create_mirror_view(lz);
+    for (PetscInt m = 0; m < N; m++) {
+      hx(m) = lx_h[m];
+      hy(m) = ly_h[m];
+      hz(m) = lz_h[m];
+    }
+    Kokkos::deep_copy(lx, hx);
+    Kokkos::deep_copy(ly, hy);
+    Kokkos::deep_copy(lz, hz);
+  }
+  const size_t nxh = N / 2 + 1;
+  const size_t nmodes = static_cast<size_t>(N) * N * nxh;
+  const size_t nN = N;
+  Kokkos::parallel_for(
+      "DecaySpectrum", Kokkos::RangePolicy<Kokkos::IndexType<size_t>>(0, nmodes),
+      KOKKOS_LAMBDA(size_t idx) {
+        const size_t kx = idx % nxh;
+        const size_t ky = (idx / nxh) % nN;
+        const size_t kz = idx / (nxh * nN);
+        const double f =
+            Kokkos::exp(-coef_tau * (lx(kx) + ly(ky) + lz(kz))) * inv_ntot;
+        cufftDoubleComplex w;
+        w.x = ft[idx].x * f;
+        w.y = ft[idx].y * f;
+        if (idx == 0) {
+          w.x += zero_shift * inv_ntot;
+        }
+        work[idx] = w;
+      });
+  Kokkos::fence();
+}
+#endif
+
+// Copy component c of the solution-like vector U into the 1-dof vector q
+static void get_field_component(DM da, Vec U, PetscInt c, DM da1, Vec q) {
+#ifdef SFGPU_KOKKOS
+  if (is_kokkos_vec(U)) {
+    field_component_kokkos(da, U, c, da1, q);
+    return;
+  }
+#endif
+  PetscInt xs, ys, zs, xm, ym, zm;
+  DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
+  PetscScalar ****u;
+  DMDAVecGetArrayDOFRead(da, U, &u);
+  PetscScalar ***qa;
+  DMDAVecGetArray(da1, q, &qa);
+  for (PetscInt k = zs; k < zs + zm; k++)
+    for (PetscInt j = ys; j < ys + ym; j++)
+      for (PetscInt i = xs; i < xs + xm; i++)
+        qa[k][j][i] = u[k][j][i][c];
+  DMDAVecRestoreArray(da1, q, &qa);
+  DMDAVecRestoreArrayDOFRead(da, U, &u);
+}
+
+#ifdef SFGPU_KOKKOS
+// GPU kernel: write the 1-dof vector q into component c of U, leaving the
+// other components unchanged
+static PetscErrorCode set_field_component_kokkos(DM da, Vec U, PetscInt c,
+                                                 DM da1, Vec q) {
+  PetscFunctionBeginUser;
+  PetscInt xs, ys, zs, xm, ym, zm;
+  PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+  NodeView u;
+  PetscCall(DMDAVecGetKokkosOffsetViewDOF(da, U, &u));
+  Kokkos::Experimental::OffsetView<const PetscScalar ***, Kokkos::LayoutRight,
+                                   KokkosMemSpace>
+      qv;
+  PetscCall(DMDAVecGetKokkosOffsetView(da1, q, &qv));
+  Kokkos::parallel_for(
+      "SetFieldComponent",
+      SitePolicy({zs, ys, xs}, {zs + zm, ys + ym, xs + xm}),
+      KOKKOS_LAMBDA(PetscInt k, PetscInt j, PetscInt i) {
+        u(k, j, i, c) = qv(k, j, i);
+      });
+  Kokkos::fence();
+  PetscCall(DMDAVecRestoreKokkosOffsetView(da1, q, &qv));
+  PetscCall(DMDAVecRestoreKokkosOffsetViewDOF(da, U, &u));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+#endif
+
+// Write the 1-dof vector q into component c of U
+static void set_field_component(DM da, Vec U, PetscInt c, DM da1, Vec q) {
+#ifdef SFGPU_KOKKOS
+  if (is_kokkos_vec(U)) {
+    set_field_component_kokkos(da, U, c, da1, q);
+    return;
+  }
+#endif
+  PetscInt xs, ys, zs, xm, ym, zm;
+  DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
+  PetscScalar ****u;
+  DMDAVecGetArrayDOF(da, U, &u);
+  const PetscScalar ***qa;
+  DMDAVecGetArrayRead(da1, q, &qa);
+  for (PetscInt k = zs; k < zs + zm; k++)
+    for (PetscInt j = ys; j < ys + ym; j++)
+      for (PetscInt i = xs; i < xs + xm; i++)
+        u[k][j][i][c] = qa[k][j][i];
+  DMDAVecRestoreArrayRead(da1, q, &qa);
+  DMDAVecRestoreArrayDOF(da, U, &u);
+}
+
+void Measurer::setupAnalyticalCoarsening(Vec *U) {
+  setupSpectra();
+  finalizeAnalyticalCoarsening();
+  DM &da = model->domain;
+  const size_t nmodes = fftw3d ? fftw3d->size_out() : 0;
+  constexpr PetscInt Ndof = ModelAData::Ndof;
+
+  PetscMPIInt rank;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+
+  for (PetscInt c = 0; c < Ndof; c++) {
+    // Component c to rank 0 in natural ordering (as in computeFieldSpectra)
+    get_field_component(da, *U, c, da1, qglob);
+    Vec qfull = qglob;
+    if (toZero) {
+      DMDAGlobalToNaturalBegin(da1, qglob, INSERT_VALUES, qnat);
+      DMDAGlobalToNaturalEnd(da1, qglob, INSERT_VALUES, qnat);
+      VecScatterBegin(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD);
+      VecScatterEnd(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD);
+      qfull = qseq;
+    }
+    if (rank == 0) {
+      const PetscScalar *qdata;
+      PetscMemType mtype;
+      VecGetArrayReadAndMemType(qfull, &qdata, &mtype);
+#ifdef SFGPU_CUFFT
+      if (PetscMemTypeDevice(mtype)) {
+        if (!d_coarse_ft) {
+          if (cudaMalloc(&d_coarse_ft,
+                         Ndof * nmodes * sizeof(cufftDoubleComplex)) !=
+                  cudaSuccess ||
+              cudaMalloc(&d_coarse_work,
+                         nmodes * sizeof(cufftDoubleComplex)) != cudaSuccess) {
+            throw std::runtime_error(
+                "analytical coarsening: cudaMalloc of the spectra failed");
+          }
+          coarse_on_device = true;
+        }
+        Kokkos::fence();
+        const cufftDoubleComplex *ft = fftw3d->execute_device(qdata);
+        cudaMemcpy(d_coarse_ft + c * nmodes, ft,
+                   nmodes * sizeof(cufftDoubleComplex),
+                   cudaMemcpyDeviceToDevice);
+      } else
+#endif
+      {
+        (void)mtype;
+        if (coarse_ft.empty()) {
+          coarse_ft.resize(Ndof * nmodes);
+          coarse_work.resize(nmodes);
+        }
+        const std::complex<double> *ft = fftw3d->execute_host(qdata);
+        std::copy(ft, ft + nmodes, coarse_ft.begin() + c * nmodes);
+      }
+      VecRestoreArrayReadAndMemType(qfull, &qdata);
+    }
+  }
+}
+
+void Measurer::analyticalCoarsenedField(double tau, Vec *out) {
+  DM &da = model->domain;
+  const auto &data = model->data;
+  const auto &coeff = data.acoefficients;
+  const size_t nmodes = fftw3d ? fftw3d->size_out() : 0;
+  constexpr PetscInt Ndof = ModelAData::Ndof;
+  const double ntot = static_cast<double>(N) * N * N;
+  const std::vector<double> lx = laplacian_1d(N, data.hX());
+  const std::vector<double> ly = laplacian_1d(N, data.hY());
+  const std::vector<double> lz = laplacian_1d(N, data.hZ());
+
+  PetscMPIInt rank;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+
+  for (PetscInt c = 0; c < Ndof; c++) {
+    // phi diffuses with Gamma and is driven by Gamma H sigma/f (phi_0 only),
+    // the charges diffuse with D, as in ModelGExplicitDiffusionStep::step_on
+    const bool is_phi = c < ModelAData::Nphi;
+    const double coef_tau = (is_phi ? coeff.Gamma() : coeff.D()) * tau;
+    const double zero_shift =
+        (c == 0) ? ntot * coeff.Gamma() * coeff.H *
+                       coeff.sigmabyf(data.atime.t()) * tau
+                 : 0.;
+
+    Vec qfull = toZero ? qseq : qglob;
+    if (rank == 0) {
+      PetscScalar *qdata;
+      PetscMemType mtype;
+      VecGetArrayWriteAndMemType(qfull, &qdata, &mtype);
+#ifdef SFGPU_CUFFT
+      if (coarse_on_device) {
+        decay_spectrum_kokkos(d_coarse_ft + c * nmodes, d_coarse_work, N, lx,
+                              ly, lz, coef_tau, zero_shift, 1. / ntot);
+        if (PetscMemTypeDevice(mtype)) {
+          fftw3d->execute_inverse_device(d_coarse_work, qdata);
+        } else {
+          throw std::runtime_error(
+              "analytical coarsening: spectra on the device but the field "
+              "vector on the host");
+        }
+      } else
+#endif
+      {
+        (void)mtype;
+        decay_spectrum_host(coarse_ft.data() + c * nmodes, coarse_work.data(),
+                            N, lx, ly, lz, coef_tau, zero_shift, 1. / ntot);
+        fftw3d->execute_inverse_host(coarse_work.data(), qdata);
+      }
+      VecRestoreArrayWriteAndMemType(qfull, &qdata);
+    }
+    // Back from rank 0 in natural ordering to the distributed global vector
+    if (toZero) {
+      VecScatterBegin(toZero, qseq, qnat, INSERT_VALUES, SCATTER_REVERSE);
+      VecScatterEnd(toZero, qseq, qnat, INSERT_VALUES, SCATTER_REVERSE);
+      DMDANaturalToGlobalBegin(da1, qnat, INSERT_VALUES, qglob);
+      DMDANaturalToGlobalEnd(da1, qnat, INSERT_VALUES, qglob);
+    }
+    set_field_component(da, *out, c, da1, qglob);
+  }
+}
+
+void Measurer::finalizeAnalyticalCoarsening() {
+  coarse_ft.clear();
+  coarse_ft.shrink_to_fit();
+  coarse_work.clear();
+  coarse_work.shrink_to_fit();
+#ifdef SFGPU_CUFFT
+  if (d_coarse_ft) {
+    cudaFree(d_coarse_ft);
+    d_coarse_ft = nullptr;
+  }
+  if (d_coarse_work) {
+    cudaFree(d_coarse_work);
+    d_coarse_work = nullptr;
+  }
+#endif
+  coarse_on_device = false;
+}
+
 void rotate_to_vev(nvector<std::complex<double>, 2> &wallk,
                    nvector<std::complex<double>, 2> &wallk_rotated) {
   std::array<std::complex<double>, 4> n{};

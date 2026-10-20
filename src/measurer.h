@@ -76,11 +76,14 @@ private:
   std::vector<double> in_ptr;
   std::vector<std::complex<double>> out_ptr;
   fftw_plan fftw_plan_handle = nullptr;
+  fftw_plan fftw_inverse_plan = nullptr; // c2r on the same buffers
 #ifdef SFGPU_CUFFT
   // cuFFT (device)
   cufftHandle cufft_plan;
   bool have_cufft = false;
   cufftDoubleComplex *d_out = nullptr;
+  cufftHandle cufft_inverse_plan;
+  bool have_cufft_inverse = false;
 #endif
 
 public:
@@ -91,10 +94,16 @@ public:
     if (fftw_plan_handle) {
       fftw_destroy_plan(fftw_plan_handle);
     }
+    if (fftw_inverse_plan) {
+      fftw_destroy_plan(fftw_inverse_plan);
+    }
 #ifdef SFGPU_CUFFT
     if (have_cufft) {
       cufftDestroy(cufft_plan);
       cudaFree(d_out);
+    }
+    if (have_cufft_inverse) {
+      cufftDestroy(cufft_inverse_plan);
     }
 #endif
   }
@@ -118,6 +127,24 @@ public:
     return out_ptr.data();
   }
 
+  // Inverse (c2r, unnormalized) of execute_host: the half spectrum `in`
+  // (host memory, size size_out()) to the real volume `out` (host memory,
+  // size size_in()). `in` is not modified.
+  void execute_inverse_host(const std::complex<double> *in, double *out) {
+    if (!fftw_inverse_plan) {
+      in_ptr.resize(size_in());
+      out_ptr.resize(out_size);
+      fftw_inverse_plan = fftw_plan_dft_c2r_3d(
+          static_cast<int>(n0), static_cast<int>(n1), static_cast<int>(n2),
+          reinterpret_cast<fftw_complex *>(out_ptr.data()), in_ptr.data(),
+          FFTW_MEASURE);
+    }
+    // c2r overwrites its input, so transform a copy
+    std::copy(in, in + out_size, out_ptr.begin());
+    fftw_execute(fftw_inverse_plan);
+    std::copy(in_ptr.begin(), in_ptr.end(), out);
+  }
+
 #ifdef SFGPU_CUFFT
   // Transform the real volume `d_in` (device memory, size n0*n1*n2; not
   // modified). Returns the half spectrum in device memory, valid until the
@@ -139,6 +166,22 @@ public:
     cufftExecD2Z(cufft_plan, const_cast<double *>(d_in), d_out);
     cudaDeviceSynchronize();
     return d_out;
+  }
+
+  // Inverse (Z2D, unnormalized) of execute_device: the half spectrum d_in
+  // (device memory, size size_out(); overwritten, as cuFFT may do for C2R)
+  // to the real volume d_real (device memory, size size_in()).
+  void execute_inverse_device(cufftDoubleComplex *d_in, double *d_real) {
+    if (!have_cufft_inverse) {
+      if (cufftPlan3d(&cufft_inverse_plan, static_cast<int>(n0),
+                      static_cast<int>(n1), static_cast<int>(n2),
+                      CUFFT_Z2D) != CUFFT_SUCCESS) {
+        throw std::runtime_error("measurer_fft_3d: cufftPlan3d (Z2D) failed");
+      }
+      have_cufft_inverse = true;
+    }
+    cufftExecZ2D(cufft_inverse_plan, d_in, d_real);
+    cudaDeviceSynchronize();
   }
 #endif
 };
@@ -394,6 +437,7 @@ public:
   }
 
   virtual ~Measurer() {
+    finalizeAnalyticalCoarsening();
 #ifdef SFGPU_CUFFT
     if (d_field_ft_buf) cudaFree(d_field_ft_buf);
 #endif
@@ -431,6 +475,19 @@ public:
   // Computes radially binned 3D power spectra of the transverse fields
   // pi_a and A_a. Collective, like measure_topcharge.
   void measure_field_spectra(Vec *solution) { computeFieldSpectra(solution); }
+
+  // Exact coarsening for simple dissipation (preserve_norm = false). The
+  // coarsening diffusion is then linear: every Fourier mode of a field
+  // component decays as exp(-c lambda(k) tau), with the lattice Laplacian
+  // lambda(k) = sum_d (2 - 2 cos k_d)/h_d^2 of the diffusion stencil and
+  // c = Gamma for phi, D for the charges; the source Gamma H sigma/f moves
+  // the zero mode of phi_0 linearly in tau. setupAnalyticalCoarsening stores
+  // the spectra of all Ndof components of U on rank 0 (in device memory if U
+  // is a Kokkos vector); analyticalCoarsenedField writes the exactly diffused
+  // field at diffusion time tau into out. All three are collective.
+  void setupAnalyticalCoarsening(Vec *U);
+  void analyticalCoarsenedField(double tau, Vec *out);
+  void finalizeAnalyticalCoarsening();
 
   ModelA *getModel() { return model; }
   PetscInt getN() { return N; }
@@ -470,6 +527,17 @@ private:
   Vec qnat = nullptr;           // natural ordering (more than one rank)
   Vec qseq = nullptr;           // all of q on rank 0 (more than one rank)
   VecScatter toZero = nullptr;
+
+  // Analytical coarsening (rank 0): the half spectra of all Ndof components
+  // at tau = 0, one after the other, plus one work spectrum; on the host or,
+  // if coarse_on_device, on the device
+  std::vector<std::complex<double>> coarse_ft;
+  std::vector<std::complex<double>> coarse_work;
+  bool coarse_on_device = false;
+#ifdef SFGPU_CUFFT
+  cufftDoubleComplex *d_coarse_ft = nullptr;
+  cufftDoubleComplex *d_coarse_work = nullptr;
+#endif
 
   ModelA *model;
   PetscInt N;
