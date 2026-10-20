@@ -56,8 +56,9 @@ public:
   virtual void save_topcharge(const std::string &what = "") override;
   virtual void save_field_spectra(const std::string &what = "") override;
   virtual void save_coarsening(const std::string &what = "") override;
-  // Diffusion time tau of the last coarsening spectrum (and tau/dt)
-  void save_coarsening_time(double tau, double step);
+  // Diffusion time tau of the last coarsening spectrum (and tau/dt), and
+  // the start time t_start of its coarsening
+  void save_coarsening_time(double tau, double step, double t_start);
 
 private:
   Measurer *measure;
@@ -125,6 +126,7 @@ private:
   std::unique_ptr<ntuple<1>> coarsen_ReC;
   std::unique_ptr<ntuple<1>> coarsen_step; // tau / dt (not an integer)
   std::unique_ptr<ntuple<1>> coarsen_time; // diffusion time tau
+  std::unique_ptr<ntuple<1>> coarsen_tstart; // start of its coarsening
   std::unique_ptr<ntuple<1>> coarsen_kbins;
   std::unique_ptr<ntuple<1>> coarsen_nshell;
   std::unique_ptr<ntuple<1>> coarsen_bin_edges;

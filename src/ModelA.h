@@ -10,6 +10,7 @@
 #include <petscviewerhdf5.h>
 #endif
 #include "nlohmann/json.hpp"
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
@@ -133,14 +134,16 @@ struct ModelAHandlerData {
   // analytical_coarsening: 1/(Gamma k_1^2), see ModelAData::coarsening_times),
   // in substeps h with max(Gamma, D) * h <= 1/24 (see run_event). The field
   // spectra are measured at NCoarsenSpectra log-spaced diffusion times, see
-  // ModelAData::coarsening_times.  Disabled when time_start_coarsening < 0.
+  // ModelAData::coarsening_times.  time_start_coarsening is one start time
+  // or a list of them (one coarsening each, from the field at that time);
+  // empty, or a single negative number in the input, disables it.
   // preserve_norm_coarsening: true renormalizes phi to |phi| = f after every
   // diffusion step (dissipation on the sphere), false lets |phi| relax freely
   // (simple dissipation).
   // analytical_coarsening: for simple dissipation only; instead of time
   // stepping, diffuse every Fourier mode exactly to each readout time (see
   // Measurer::setupAnalyticalCoarsening).
-  double time_start_coarsening = -1.0;
+  std::vector<double> time_start_coarsening;
   int NCoarsenSpectra = 10;
   int timesteps_coarsening = 10;
   bool preserve_norm_coarsening = true;
@@ -164,8 +167,15 @@ struct ModelAHandlerData {
 
     if (params.contains("coarsening_settings")) {
       auto &cs = params["coarsening_settings"];
-      time_start_coarsening =
-          cs.value("time_start_coarsening", time_start_coarsening);
+      if (cs.contains("time_start_coarsening")) {
+        const auto &ts = cs["time_start_coarsening"];
+        if (ts.is_array()) {
+          time_start_coarsening = ts.get<std::vector<double>>();
+        } else if (ts.get<double>() >= 0.) {
+          time_start_coarsening = {ts.get<double>()};
+        }
+        std::sort(time_start_coarsening.begin(), time_start_coarsening.end());
+      }
       // Replaced by the log-spaced readout; fail instead of ignoring it
       if (cs.contains("saveFrequencyCoarsening")) {
         throw std::runtime_error(
@@ -205,10 +215,14 @@ struct ModelAHandlerData {
     PetscPrintf(PETSC_COMM_WORLD, "compute_energy = %s\n",
                 (compute_energy ? "true" : "false"));
 
-    PetscPrintf(PETSC_COMM_WORLD, "coarsening: time_start = %g, "
+    std::string starts;
+    for (const double t_s : time_start_coarsening) {
+      starts += (starts.empty() ? "" : ", ") + std::to_string(t_s);
+    }
+    PetscPrintf(PETSC_COMM_WORLD, "coarsening: time_start = [%s], "
                 "NCoarsenSpectra = %d, timesteps = %d, preserve_norm = %s, "
                 "analytical_coarsening = %s\n",
-                time_start_coarsening, NCoarsenSpectra,
+                starts.c_str(), NCoarsenSpectra,
                 timesteps_coarsening,
                 (preserve_norm_coarsening ? "true" : "false"),
                 (analytical_coarsening ? "true" : "false"));
@@ -280,14 +294,20 @@ public:
     double finaltime = atime.adjust_finaltime(ahandler.saveFrequency);
     params["finaltime"] = finaltime;
 
-    // Check the coarsening readout now rather than when it starts
-    if (ahandler.time_start_coarsening >= 0) {
+    // Check every coarsening and its readout now rather than when it starts
+    for (const double t_s : ahandler.time_start_coarsening) {
+      if (!(t_s < atime.tfinal())) {
+        throw std::runtime_error(
+            "coarsening: time_start_coarsening " + std::to_string(t_s) +
+            " is not before finaltime " + std::to_string(atime.tfinal()) +
+            " and would never be reached");
+      }
       double kGamma = 0.;
-      const std::vector<double> tau = coarsening_times(&kGamma);
+      const std::vector<double> tau = coarsening_times(t_s, &kGamma);
       PetscPrintf(PETSC_COMM_WORLD,
-                  "coarsening: k_Gamma = %g, %zu spectra at diffusion times "
-                  "%g ... %g%s\n",
-                  kGamma, tau.size(), tau.front(), tau.back(),
+                  "coarsening at t_start = %g: k_Gamma = %g, %zu spectra at "
+                  "diffusion times %g ... %g%s\n",
+                  t_s, kGamma, tau.size(), tau.front(), tau.back(),
                   ahandler.analytical_coarsening
                       ? " (tau_final = 1/(Gamma k_1^2), timesteps_coarsening "
                         "not used)"
@@ -303,8 +323,9 @@ public:
   }
 
   // Diffusion times tau_n, counted from the start of the coarsening, at which
-  // the coarsening spectra are measured. With the diffusive momentum at the
-  // start t_s = time_start_coarsening,
+  // the coarsening spectra are measured, for the coarsening that starts at
+  // t_s (an entry of time_start_coarsening). With the diffusive momentum at
+  // the start,
   //     k_Gamma^2 = 1/(Gamma t_s) - m^2,   m^2 = H (sigma/f) / f,
   // the first readout is when modes at 1.2 k_Gamma have diffused,
   //     tau_first = 1/(Gamma (1.2 k_Gamma)^2),
@@ -314,10 +335,10 @@ public:
   // the lowest lattice momentum k_1 = 2 pi / L:
   //     tau_n = tau_first (tau_final/tau_first)^(n/(N-1)),  n = 0..N-1.
   // Throws if this gives no valid schedule. Optionally returns k_Gamma.
-  std::vector<double> coarsening_times(double *kGamma = nullptr) const {
+  std::vector<double> coarsening_times(double t_s,
+                                       double *kGamma = nullptr) const {
     const auto &c = acoefficients;
     const auto &h = ahandler;
-    const double t_s = h.time_start_coarsening;
     const double Gamma = c.Gamma();
     const double m2 = c.H * c.sigmabyf(t_s) / std::sqrt(c.f2(t_s));
     if (!(t_s > 0.)) {

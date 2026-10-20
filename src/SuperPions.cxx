@@ -54,6 +54,73 @@ void initialize_event(const int &ievent, ModelA *const model,
   }
 }
 
+// One coarsening, started from the current solution at the entry t_s of
+// time_start_coarsening: duplicate the solution, apply pure diffusion to the
+// copy, and measure field spectra at log-spaced diffusion times
+// (ModelAData::coarsening_times). The solution itself is not changed.
+static void run_coarsening(double t_s, ModelA *const model, Measurer &measurer,
+                           measurer_output_fasthdf5 *measurer_output,
+                           int rank) {
+  const auto &ahandler = model->data.ahandler;
+  const auto &atime = model->data.atime;
+
+  // Largest diffusion substep: max(Gamma, D) * hmax = 1/24. Each lattice
+  // mode is multiplied by 1 - Gamma h khat^2 with khat^2 <= 12, so
+  // Gamma h < 1/12 keeps every mode from changing sign; this is half
+  // of that bound.
+  const auto &coeff = model->data.acoefficients;
+  const double hmax = 1. / (24. * std::max(coeff.Gamma(), coeff.D()));
+  double kGamma = 0.;
+  const std::vector<double> tau_meas =
+      model->data.coarsening_times(t_s, &kGamma);
+  PetscPrintf(PETSC_COMM_WORLD,
+              "Coarsening: t_start = %g, starting at t = %g, k_Gamma = %g, "
+              "%zu spectra at diffusion times %g ... %g, %s, %s\n",
+              t_s, (double)atime.t(), kGamma, tau_meas.size(),
+              tau_meas.front(), tau_meas.back(),
+              ahandler.preserve_norm_coarsening
+                  ? "on the sphere (|phi| = f)"
+                  : "simple dissipation (|phi| free)",
+              ahandler.analytical_coarsening
+                  ? "exact in Fourier space"
+                  : ("substeps <= " + std::to_string(hmax)).c_str());
+
+  Vec sol_coarse;
+  VecDuplicate(model->solution, &sol_coarse);
+  VecCopy(model->solution, sol_coarse);
+  ModelGExplicitDiffusionStep diffuser(*model);
+  if (ahandler.analytical_coarsening) {
+    measurer.setupAnalyticalCoarsening(&model->solution);
+  }
+
+  // Diffuse from one readout time to the next in equal substeps of at most
+  // hmax, so every spectrum is taken exactly at its tau. Or, with
+  // analytical_coarsening, diffuse exactly from tau = 0 to each tau.
+  double tau = 0.;
+  for (const double tau_next : tau_meas) {
+    const double span = tau_next - tau;
+    if (ahandler.analytical_coarsening) {
+      measurer.analyticalCoarsenedField(tau_next, &sol_coarse);
+    } else if (span > 0.) {
+      const int nstep =
+          std::max(1, static_cast<int>(std::ceil(span / hmax - 1e-9)));
+      for (int istep = 0; istep < nstep; istep++) {
+        diffuser.step_on(span / nstep, sol_coarse,
+                         ahandler.preserve_norm_coarsening);
+      }
+    }
+    tau = tau_next;
+    measurer.measure_field_spectra(&sol_coarse);
+    if (rank == 0) {
+      measurer_output->save_coarsening();
+      measurer_output->save_coarsening_time(tau, tau / atime.dt(), t_s);
+    }
+  }
+  measurer.finalizeAnalyticalCoarsening();
+  VecDestroy(&sol_coarse);
+  PetscPrintf(PETSC_COMM_WORLD, "Coarsening: t_start = %g done\n", t_s);
+}
+
 void run_event(const int &ievent, ModelA *const model, Stepper *const step,
                nlohmann::json &inputs) {
 
@@ -104,7 +171,7 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
   }
 
   // Start the loop
-  bool coarsening_done = false;
+  size_t next_coarsening = 0;
   const double tiny = 1.e-10;
   while (atime.t() < atime.tfinal() - tiny) {
 
@@ -151,68 +218,14 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       PetscLogStagePop();
     }
 
-    // One-shot coarsening: at the specified time, duplicate the solution,
-    // apply pure diffusion, and measure field spectra at log-spaced
-    // diffusion times (ModelAData::coarsening_times).
-    if (ahandler.time_start_coarsening >= 0 &&
-        !coarsening_done &&
-        atime.t() >= ahandler.time_start_coarsening) {
-      coarsening_done = true;
-      // Largest diffusion substep: max(Gamma, D) * hmax = 1/24. Each lattice
-      // mode is multiplied by 1 - Gamma h khat^2 with khat^2 <= 12, so
-      // Gamma h < 1/12 keeps every mode from changing sign; this is half
-      // of that bound.
-      const auto &coeff = model->data.acoefficients;
-      const double hmax = 1. / (24. * std::max(coeff.Gamma(), coeff.D()));
-      double kGamma = 0.;
-      const std::vector<double> tau_meas =
-          model->data.coarsening_times(&kGamma);
-      PetscPrintf(PETSC_COMM_WORLD,
-                  "Coarsening: starting at t = %g, k_Gamma = %g, %zu spectra "
-                  "at diffusion times %g ... %g, %s, %s\n",
-                  (double)atime.t(), kGamma, tau_meas.size(),
-                  tau_meas.front(), tau_meas.back(),
-                  ahandler.preserve_norm_coarsening
-                      ? "on the sphere (|phi| = f)"
-                      : "simple dissipation (|phi| free)",
-                  ahandler.analytical_coarsening
-                      ? "exact in Fourier space"
-                      : ("substeps <= " + std::to_string(hmax)).c_str());
-
-      Vec sol_coarse;
-      VecDuplicate(model->solution, &sol_coarse);
-      VecCopy(model->solution, sol_coarse);
-      ModelGExplicitDiffusionStep diffuser(*model);
-      if (ahandler.analytical_coarsening) {
-        measurer.setupAnalyticalCoarsening(&model->solution);
-      }
-
-      // Diffuse from one readout time to the next in equal substeps of at
-      // most hmax, so every spectrum is taken exactly at its tau. Or, with
-      // analytical_coarsening, diffuse exactly from tau = 0 to each tau.
-      double tau = 0.;
-      for (const double tau_next : tau_meas) {
-        const double span = tau_next - tau;
-        if (ahandler.analytical_coarsening) {
-          measurer.analyticalCoarsenedField(tau_next, &sol_coarse);
-        } else if (span > 0.) {
-          const int nstep =
-              std::max(1, static_cast<int>(std::ceil(span / hmax - 1e-9)));
-          for (int istep = 0; istep < nstep; istep++) {
-            diffuser.step_on(span / nstep, sol_coarse,
-                             ahandler.preserve_norm_coarsening);
-          }
-        }
-        tau = tau_next;
-        measurer.measure_field_spectra(&sol_coarse);
-        if (rank == 0) {
-          measurer_output->save_coarsening();
-          measurer_output->save_coarsening_time(tau, tau / atime.dt());
-        }
-      }
-      measurer.finalizeAnalyticalCoarsening();
-      VecDestroy(&sol_coarse);
-      PetscPrintf(PETSC_COMM_WORLD, "Coarsening: done\n");
+    // Coarsenings: one for each entry of time_start_coarsening (sorted)
+    // that has been reached, each from the current solution
+    while (next_coarsening < ahandler.time_start_coarsening.size() &&
+           atime.t() >=
+               ahandler.time_start_coarsening[next_coarsening] - tiny) {
+      run_coarsening(ahandler.time_start_coarsening[next_coarsening], model,
+                     measurer, measurer_output.get(), rank);
+      next_coarsening++;
     }
 
     // Write the solution to tape if writeFrequency > 0. This is used for

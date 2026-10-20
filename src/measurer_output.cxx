@@ -101,6 +101,8 @@ measurer_output_fasthdf5::measurer_output_fasthdf5(Measurer *in,
   NN1 = {1};
   coarsen_step = std::make_unique<ntuple<1>>(NN1, "coarsen_step", file_id);
   coarsen_time = std::make_unique<ntuple<1>>(NN1, "coarsen_time", file_id);
+  coarsen_tstart =
+      std::make_unique<ntuple<1>>(NN1, "coarsen_tstart", file_id);
 }
 
 measurer_output_fasthdf5::~measurer_output_fasthdf5() { H5Fclose(file_id); }
@@ -228,11 +230,14 @@ void measurer_output_fasthdf5::save_coarsening(const std::string &what) {
   coarsen_ReC->fill();
 }
 
-void measurer_output_fasthdf5::save_coarsening_time(double tau, double step) {
+void measurer_output_fasthdf5::save_coarsening_time(double tau, double step,
+                                                    double t_start) {
   coarsen_step->row[0] = step;
   coarsen_step->fill();
   coarsen_time->row[0] = tau;
   coarsen_time->fill();
+  coarsen_tstart->row[0] = t_start;
+  coarsen_tstart->fill();
 }
 #endif
 
