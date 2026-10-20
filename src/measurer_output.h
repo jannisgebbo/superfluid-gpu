@@ -56,7 +56,8 @@ public:
   virtual void save_topcharge(const std::string &what = "") override;
   virtual void save_field_spectra(const std::string &what = "") override;
   virtual void save_coarsening(const std::string &what = "") override;
-  void save_coarsening_step(int step_index);
+  // Diffusion time tau of the last coarsening spectrum (and tau/dt)
+  void save_coarsening_time(double tau, double step);
 
 private:
   Measurer *measure;
@@ -118,11 +119,12 @@ private:
   bool fields_static_written = false;
 
   // Coarsening: same format as field spectra, separate datasets.
-  // Also records the diffusion step index.
+  // Also records the diffusion time of each spectrum.
   std::unique_ptr<ntuple<1>> coarsen_Pphi;
   std::unique_ptr<ntuple<1>> coarsen_PAA;
   std::unique_ptr<ntuple<1>> coarsen_ReC;
-  std::unique_ptr<ntuple<1>> coarsen_step; // diffusion step number
+  std::unique_ptr<ntuple<1>> coarsen_step; // tau / dt (not an integer)
+  std::unique_ptr<ntuple<1>> coarsen_time; // diffusion time tau
   std::unique_ptr<ntuple<1>> coarsen_kbins;
   std::unique_ptr<ntuple<1>> coarsen_nshell;
   std::unique_ptr<ntuple<1>> coarsen_bin_edges;

@@ -151,26 +151,30 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
     }
 
     // One-shot coarsening: at the specified time, duplicate the solution,
-    // apply pure diffusion, and measure field spectra at regular intervals.
+    // apply pure diffusion, and measure field spectra at log-spaced
+    // diffusion times (ModelAData::coarsening_times).
     if (ahandler.time_start_coarsening >= 0 &&
         !coarsening_done &&
         atime.t() >= ahandler.time_start_coarsening) {
       coarsening_done = true;
-      // Each coarsening step of length dt is split into as many diffusion
-      // substeps as the time evolution uses ('B' in step_sequence), so the
-      // diffusion is as accurate as in the evolution (dt*Gamma/nsub < 1/12,
-      // no high-k mode changes sign)
+      // Diffusion substeps are no larger than in the time evolution, dt
+      // over the number of 'B' in step_sequence, so the diffusion is as
+      // accurate as there (dt*Gamma/nsub < 1/12, no high-k mode changes sign)
       const std::string step_sequence =
           inputs["SuperSplitStep"].value<std::string>("step_sequence",
                                                       "ABBBBBB");
       const int nsub = std::max(
           1, static_cast<int>(std::count(step_sequence.begin(),
                                          step_sequence.end(), 'B')));
+      const double hmax = atime.dt() / nsub;
+      double kGamma = 0.;
+      const std::vector<double> tau_meas =
+          model->data.coarsening_times(&kGamma);
       PetscPrintf(PETSC_COMM_WORLD,
-                  "Coarsening: starting at t = %g, %d diffusion steps of "
-                  "%d substeps, measuring every %d steps, %s\n",
-                  (double)atime.t(), ahandler.timesteps_coarsening, nsub,
-                  ahandler.saveFrequencyCoarsening,
+                  "Coarsening: starting at t = %g, k_Gamma = %g, %zu spectra "
+                  "at diffusion times %g ... %g, substeps <= %g, %s\n",
+                  (double)atime.t(), kGamma, tau_meas.size(),
+                  tau_meas.front(), tau_meas.back(), hmax,
                   ahandler.preserve_norm_coarsening
                       ? "on the sphere (|phi| = f)"
                       : "simple dissipation (|phi| free)");
@@ -180,18 +184,24 @@ void run_event(const int &ievent, ModelA *const model, Stepper *const step,
       VecCopy(model->solution, sol_coarse);
       ModelGExplicitDiffusionStep diffuser(*model);
 
-      for (int cs_step = 1; cs_step <= ahandler.timesteps_coarsening;
-           cs_step++) {
-        for (int isub = 0; isub < nsub; isub++) {
-          diffuser.step_on(atime.dt() / nsub, sol_coarse,
-                           ahandler.preserve_norm_coarsening);
-        }
-        if (cs_step % ahandler.saveFrequencyCoarsening == 0) {
-          measurer.measure_field_spectra(&sol_coarse);
-          if (rank == 0) {
-            measurer_output->save_coarsening();
-            measurer_output->save_coarsening_step(cs_step);
+      // Diffuse from one readout time to the next in equal substeps of at
+      // most hmax, so every spectrum is taken exactly at its tau
+      double tau = 0.;
+      for (const double tau_next : tau_meas) {
+        const double span = tau_next - tau;
+        if (span > 0.) {
+          const int nstep =
+              std::max(1, static_cast<int>(std::ceil(span / hmax - 1e-9)));
+          for (int istep = 0; istep < nstep; istep++) {
+            diffuser.step_on(span / nstep, sol_coarse,
+                             ahandler.preserve_norm_coarsening);
           }
+        }
+        tau = tau_next;
+        measurer.measure_field_spectra(&sol_coarse);
+        if (rank == 0) {
+          measurer_output->save_coarsening();
+          measurer_output->save_coarsening_time(tau, tau / atime.dt());
         }
       }
       VecDestroy(&sol_coarse);

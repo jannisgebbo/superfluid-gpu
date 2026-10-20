@@ -10,7 +10,11 @@
 #include <petscviewerhdf5.h>
 #endif
 #include "nlohmann/json.hpp"
+#include <cmath>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 // This header file defines the structure and behavior of a simulation model
 // called ModelA. It includes necessary libraries and defines several classes
@@ -124,16 +128,16 @@ struct ModelAHandlerData {
   int writeFrequency = -1;
   bool compute_energy = false;
 
-  // Coarsening: at time_start_coarsening, duplicate the solution, apply pure
-  // diffusion for timesteps_coarsening steps of length dt (each split into
-  // the same number of substeps as the 'B' steps of the evolution), and
-  // measure field spectra every saveFrequencyCoarsening steps.  Disabled
-  // when < 0.
+  // Coarsening: at time_start_coarsening, duplicate the solution and apply
+  // pure diffusion for a diffusion time timesteps_coarsening * dt (substeps
+  // no larger than those of the 'B' steps of the evolution). The field
+  // spectra are measured at NCoarsenSpectra log-spaced diffusion times, see
+  // ModelAData::coarsening_times.  Disabled when time_start_coarsening < 0.
   // preserve_norm_coarsening: true renormalizes phi to |phi| = f after every
   // diffusion step (dissipation on the sphere), false lets |phi| relax freely
   // (simple dissipation).
   double time_start_coarsening = -1.0;
-  int saveFrequencyCoarsening= 1;
+  int NCoarsenSpectra = 10;
   int timesteps_coarsening = 10;
   bool preserve_norm_coarsening = true;
 
@@ -157,8 +161,13 @@ struct ModelAHandlerData {
       auto &cs = params["coarsening_settings"];
       time_start_coarsening =
           cs.value("time_start_coarsening", time_start_coarsening);
-      saveFrequencyCoarsening =
-          cs.value("saveFrequencyCoarsening", saveFrequencyCoarsening);
+      // Replaced by the log-spaced readout; fail instead of ignoring it
+      if (cs.contains("saveFrequencyCoarsening")) {
+        throw std::runtime_error(
+            "coarsening_settings: saveFrequencyCoarsening is no longer "
+            "supported, use NCoarsenSpectra (number of log-spaced spectra)");
+      }
+      NCoarsenSpectra = cs.value("NCoarsenSpectra", NCoarsenSpectra);
       timesteps_coarsening =
           cs.value("timesteps_coarsening", timesteps_coarsening);
       preserve_norm_coarsening =
@@ -184,8 +193,8 @@ struct ModelAHandlerData {
                 (compute_energy ? "true" : "false"));
 
     PetscPrintf(PETSC_COMM_WORLD, "coarsening: time_start = %g, "
-                "saveFrequency = %d, timesteps = %d, preserve_norm = %s\n",
-                time_start_coarsening, saveFrequencyCoarsening,
+                "NCoarsenSpectra = %d, timesteps = %d, preserve_norm = %s\n",
+                time_start_coarsening, NCoarsenSpectra,
                 timesteps_coarsening,
                 (preserve_norm_coarsening ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "eventmode = %s\n",
@@ -256,12 +265,75 @@ public:
     double finaltime = atime.adjust_finaltime(ahandler.saveFrequency);
     params["finaltime"] = finaltime;
 
+    // Check the coarsening readout now rather than when it starts
+    if (ahandler.time_start_coarsening >= 0) {
+      double kGamma = 0.;
+      const std::vector<double> tau = coarsening_times(&kGamma);
+      PetscPrintf(PETSC_COMM_WORLD,
+                  "coarsening: k_Gamma = %g, %zu spectra at diffusion times "
+                  "%g ... %g\n",
+                  kGamma, tau.size(), tau.front(), tau.back());
+    }
+
     // Printout
     int rank = 0;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
     if (rank == 0) {
       print();
     }
+  }
+
+  // Diffusion times tau_n, counted from the start of the coarsening, at which
+  // the coarsening spectra are measured. With the diffusive momentum at the
+  // start t_s = time_start_coarsening,
+  //     k_Gamma^2 = 1/(Gamma t_s) - m^2,   m^2 = H (sigma/f) / f,
+  // the first readout is when modes at 1.2 k_Gamma have diffused,
+  //     tau_first = 1/(Gamma (1.2 k_Gamma)^2),
+  // and NCoarsenSpectra readouts are log spaced up to the end of the
+  // coarsening, tau_final = timesteps_coarsening * dt:
+  //     tau_n = tau_first (tau_final/tau_first)^(n/(N-1)),  n = 0..N-1.
+  // Throws if this gives no valid schedule. Optionally returns k_Gamma.
+  std::vector<double> coarsening_times(double *kGamma = nullptr) const {
+    const auto &c = acoefficients;
+    const auto &h = ahandler;
+    const double t_s = h.time_start_coarsening;
+    const double Gamma = c.Gamma();
+    const double m2 = c.H * c.sigmabyf(t_s) / std::sqrt(c.f2(t_s));
+    if (!(t_s > 0.)) {
+      throw std::runtime_error("coarsening: time_start_coarsening must be "
+                               "> 0 to define k_Gamma");
+    }
+    const double kG2 = 1. / (Gamma * t_s) - m2;
+    if (!(kG2 > 0.)) {
+      throw std::runtime_error(
+          "coarsening: k_Gamma^2 = 1/(Gamma t_start) - m^2 = " +
+          std::to_string(kG2) + " <= 0, choose an earlier "
+          "time_start_coarsening");
+    }
+    const int N = h.NCoarsenSpectra;
+    if (N < 1) {
+      throw std::runtime_error("coarsening: NCoarsenSpectra must be >= 1");
+    }
+    const double tau_first = 1. / (Gamma * 1.2 * 1.2 * kG2);
+    const double tau_final = h.timesteps_coarsening * atime.dt();
+    if (!(tau_first < tau_final)) {
+      throw std::runtime_error(
+          "coarsening: first readout at diffusion time " +
+          std::to_string(tau_first) + " is not before the end " +
+          std::to_string(tau_final) + " = timesteps_coarsening * dt, "
+          "increase timesteps_coarsening");
+    }
+    std::vector<double> tau(N);
+    for (int n = 0; n < N; n++) {
+      tau[n] = (N == 1) ? tau_final
+                        : tau_first * std::pow(tau_final / tau_first,
+                                               double(n) / (N - 1));
+    }
+    tau.back() = tau_final; // exactly, without rounding in pow
+    if (kGamma) {
+      *kGamma = std::sqrt(kG2);
+    }
+    return tau;
   }
 
   //! Print out ModelAData for subsequent reading
