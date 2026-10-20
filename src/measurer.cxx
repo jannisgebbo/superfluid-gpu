@@ -947,7 +947,8 @@ void Measurer::computeFieldSpectra(Vec *solution) {
 
   const double ntot = static_cast<double>(N) * N * N;
   const double scale = 1.0 / (ntot * ntot);
-  const size_t nmodes = fftw3d->size_out();
+  // fftw3d exists on rank 0 only
+  const size_t nmodes = fftw3d ? fftw3d->size_out() : 0;
 
   PetscMPIInt rank;
   MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
