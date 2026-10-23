@@ -126,6 +126,9 @@ struct ModelAHandlerData {
   int saveFrequencyTopcharge = -1;
   // Radially binned 3D power spectra of the fields (see Measurer)
   int saveFrequencyFields = -1;
+  // Also measure the spectrum of the locally rotated vector density
+  // V_a = rhotilde_ab n_b (fields_PVV, and coarsen_PVV for the coarsening)
+  bool vector_spectra = false;
   int writeFrequency = -1;
   bool compute_energy = false;
 
@@ -162,6 +165,7 @@ struct ModelAHandlerData {
         params.value("saveFrequencyTopcharge", saveFrequencyTopcharge);
     saveFrequencyFields =
         params.value("saveFrequencyFields", saveFrequencyFields);
+    vector_spectra = params.value("vector_spectra", vector_spectra);
     writeFrequency = params.value("writeFrequency", writeFrequency);
     compute_energy = params.value("compute_energy", compute_energy);
 
@@ -211,6 +215,8 @@ struct ModelAHandlerData {
                 saveFrequencyTopcharge);
     PetscPrintf(PETSC_COMM_WORLD, "saveFrequencyFields = %d\n",
                 saveFrequencyFields);
+    PetscPrintf(PETSC_COMM_WORLD, "vector_spectra = %s\n",
+                (vector_spectra ? "true" : "false"));
     PetscPrintf(PETSC_COMM_WORLD, "writeFrequency = %d\n", writeFrequency);
     PetscPrintf(PETSC_COMM_WORLD, "compute_energy = %s\n",
                 (compute_energy ? "true" : "false"));

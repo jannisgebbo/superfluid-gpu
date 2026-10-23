@@ -113,6 +113,7 @@ private:
   std::unique_ptr<ntuple<1>> fields_Pphi;
   std::unique_ptr<ntuple<1>> fields_PAA;
   std::unique_ptr<ntuple<1>> fields_ReC;
+  std::unique_ptr<ntuple<1>> fields_PVV; // only with vector_spectra
   std::unique_ptr<ntuple<1>> fields_time;
   std::unique_ptr<ntuple<1>> fields_kbins;
   std::unique_ptr<ntuple<1>> fields_nshell;
@@ -124,6 +125,7 @@ private:
   std::unique_ptr<ntuple<1>> coarsen_Pphi;
   std::unique_ptr<ntuple<1>> coarsen_PAA;
   std::unique_ptr<ntuple<1>> coarsen_ReC;
+  std::unique_ptr<ntuple<1>> coarsen_PVV; // only with vector_spectra
   std::unique_ptr<ntuple<1>> coarsen_step; // tau / dt (not an integer)
   std::unique_ptr<ntuple<1>> coarsen_time; // diffusion time tau
   std::unique_ptr<ntuple<1>> coarsen_tstart; // start of its coarsening

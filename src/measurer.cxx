@@ -840,6 +840,18 @@ static void field_binning_host(const std::complex<double> *ft_pi,
   }
 }
 
+// Host binning of one spectrum: P += scale * weight * |ft|^2 per bin
+static void field_binning_single_host(const std::complex<double> *ft,
+                                      size_t nmodes, double scale,
+                                      const int *bin_map,
+                                      const double *weight, double *P) {
+  for (size_t idx = 0; idx < nmodes; idx++) {
+    const int b = bin_map[idx];
+    if (b < 0) continue;
+    P[b] += weight[idx] * scale * std::norm(ft[idx]);
+  }
+}
+
 #ifdef SFGPU_CUFFT
 // -----------------------------------------------------------------------
 // GPU binning kernel for the field spectra (precomputed bin map on device)
@@ -847,17 +859,16 @@ static void field_binning_host(const std::complex<double> *ft_pi,
 static void field_binning_kokkos(const cufftDoubleComplex *ft_pi,
                                  const cufftDoubleComplex *ft_A,
                                  size_t nmodes, double scale,
-                                 const Kokkos::View<const int *> &bin_map_d,
-                                 const Kokkos::View<const double *> &weight_d,
+                                 const int *bin_map_d, const double *weight_d,
                                  const Kokkos::View<double *> &Ppipi,
                                  const Kokkos::View<double *> &PAA,
                                  const Kokkos::View<double *> &ReC) {
   Kokkos::parallel_for(
       "FieldBinning", static_cast<int>(nmodes),
       KOKKOS_LAMBDA(int idx) {
-        const int b = bin_map_d(idx);
+        const int b = bin_map_d[idx];
         if (b < 0) return;
-        const double w = weight_d(idx) * scale;
+        const double w = weight_d[idx] * scale;
         const cufftDoubleComplex zp = ft_pi[idx];
         const cufftDoubleComplex za = ft_A[idx];
         Kokkos::atomic_add(&Ppipi(b), w * (zp.x * zp.x + zp.y * zp.y));
@@ -866,15 +877,33 @@ static void field_binning_kokkos(const cufftDoubleComplex *ft_pi,
       });
   Kokkos::fence();
 }
+
+// GPU binning of one spectrum: P += scale * weight * |ft|^2 per bin
+static void field_binning_single_kokkos(const cufftDoubleComplex *ft,
+                                        size_t nmodes, double scale,
+                                        const int *bin_map_d,
+                                        const double *weight_d,
+                                        const Kokkos::View<double *> &P) {
+  Kokkos::parallel_for(
+      "FieldBinningSingle", static_cast<int>(nmodes),
+      KOKKOS_LAMBDA(int idx) {
+        const int b = bin_map_d[idx];
+        if (b < 0) return;
+        const cufftDoubleComplex z = ft[idx];
+        Kokkos::atomic_add(&P(b), weight_d[idx] * scale * (z.x * z.x + z.y * z.y));
+      });
+  Kokkos::fence();
+}
 #endif
 
 // -----------------------------------------------------------------------
 // GPU kernel for A_a(x) = contract_rho(n(x), rho(x))[a] with local
-// n_a(x) = phi_a(x)/|phi(x)|, matching computeSliceAveragePhase.
+// n_a(x) = phi_a(x)/|phi(x)|, matching computeSliceAveragePhase. With dual,
+// V_a(x) = contract_rho(n(x), dualize_rho(rho(x)))[a] instead.
 // -----------------------------------------------------------------------
 #ifdef SFGPU_KOKKOS
 static PetscErrorCode Avec_component_local_kokkos(DM da, Vec U, PetscInt a,
-                                                  DM da1, Vec q) {
+                                                  bool dual, DM da1, Vec q) {
   PetscFunctionBeginUser;
   PetscInt xs, ys, zs, xm, ym, zm;
   PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
@@ -903,13 +932,15 @@ static PetscErrorCode Avec_component_local_kokkos(DM da, Vec U, PetscInt a,
         } else {
           n[0] = 1.0; n[1] = 0.0; n[2] = 0.0; n[3] = 0.0;
         }
-        // rho stored as A[3],V[3] at offsets oA..oA+5
-        const double r0 = u(k, j, i, oA + 0);
-        const double r1 = u(k, j, i, oA + 1);
-        const double r2 = u(k, j, i, oA + 2);
-        const double r3 = u(k, j, i, oA + 3);
-        const double r4 = u(k, j, i, oA + 4);
-        const double r5 = u(k, j, i, oA + 5);
+        // rho stored as A[3],V[3] at offsets oA..oA+5; dualize_rho swaps
+        // the two halves
+        const PetscInt o1 = oA + (dual ? 3 : 0), o2 = oA + (dual ? 0 : 3);
+        const double r0 = u(k, j, i, o1 + 0);
+        const double r1 = u(k, j, i, o1 + 1);
+        const double r2 = u(k, j, i, o1 + 2);
+        const double r3 = u(k, j, i, o2 + 0);
+        const double r4 = u(k, j, i, o2 + 1);
+        const double r5 = u(k, j, i, o2 + 2);
         double result;
         switch (a) {
         case 0: result = -(n[1]*r0) - n[2]*r1 - n[3]*r2;  break;
@@ -926,6 +957,73 @@ static PetscErrorCode Avec_component_local_kokkos(DM da, Vec U, PetscInt a,
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 #endif
+
+// q = A_a(x) = contract_rho(n(x), rho(x))[a] with the local direction
+// n(x) = phi(x)/|phi(x)| of the solution-like vector U, or with dual the
+// vector density V_a(x) = contract_rho(n(x), dualize_rho(rho(x)))[a]
+static void rotated_charge_component(DM da, Vec U, PetscInt a, bool dual,
+                                     DM da1, Vec q) {
+#ifdef SFGPU_KOKKOS
+  if (is_kokkos_vec(U)) {
+    Avec_component_local_kokkos(da, U, a, dual, da1, q);
+    return;
+  }
+#endif
+  PetscInt xs, ys, zs, xm, ym, zm;
+  DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
+  PetscScalar ****u;
+  DMDAVecGetArrayDOFRead(da, U, &u);
+  PetscScalar ***qa;
+  DMDAVecGetArray(da1, q, &qa);
+  const PetscInt o1 = ModelAData::OffsetA + (dual ? 3 : 0);
+  const PetscInt o2 = ModelAData::OffsetA + (dual ? 0 : 3);
+  for (PetscInt k = zs; k < zs + zm; k++) {
+    for (PetscInt j = ys; j < ys + ym; j++) {
+      for (PetscInt i = xs; i < xs + xm; i++) {
+        // Local unit vector n = phi/|phi|
+        double n[ModelAData::Nphi];
+        double phi2 = 0.0;
+        for (int l = 0; l < ModelAData::Nphi; l++) {
+          n[l] = u[k][j][i][l];
+          phi2 += n[l] * n[l];
+        }
+        if (phi2 > 100.0 * std::numeric_limits<double>::min()) {
+          const double inv = 1.0 / sqrt(phi2);
+          for (int l = 0; l < ModelAData::Nphi; l++) n[l] *= inv;
+        } else {
+          n[0] = 1.0; n[1] = 0.0; n[2] = 0.0; n[3] = 0.0;
+        }
+        const double r0 = u[k][j][i][o1 + 0];
+        const double r1 = u[k][j][i][o1 + 1];
+        const double r2 = u[k][j][i][o1 + 2];
+        const double r3 = u[k][j][i][o2 + 0];
+        const double r4 = u[k][j][i][o2 + 1];
+        const double r5 = u[k][j][i][o2 + 2];
+        double result;
+        switch (a) {
+        case 0: result = -(n[1]*r0) - n[2]*r1 - n[3]*r2;  break;
+        case 1: result = n[0]*r0 + n[3]*r4 - n[2]*r5;     break;
+        case 2: result = n[0]*r1 - n[3]*r3 + n[1]*r5;     break;
+        default: result = n[0]*r2 + n[2]*r3 - n[1]*r4;    break;
+        }
+        qa[k][j][i] = result;
+      }
+    }
+  }
+  DMDAVecRestoreArray(da1, q, &qa);
+  DMDAVecRestoreArrayDOFRead(da, U, &u);
+}
+
+Vec Measurer::gatherQToZero() {
+  if (!toZero) {
+    return qglob;
+  }
+  DMDAGlobalToNaturalBegin(da1, qglob, INSERT_VALUES, qnat);
+  DMDAGlobalToNaturalEnd(da1, qglob, INSERT_VALUES, qnat);
+  VecScatterBegin(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD);
+  VecScatterEnd(toZero, qnat, qseq, INSERT_VALUES, SCATTER_FORWARD);
+  return qseq;
+}
 
 // -----------------------------------------------------------------------
 // computeFieldSpectra: power spectra of phi_a and locally-rotated A_a
@@ -944,6 +1042,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
   std::fill(field_Pphi.begin(), field_Pphi.end(), 0.0);
   std::fill(field_PAA.begin(), field_PAA.end(), 0.0);
   std::fill(field_ReC.begin(), field_ReC.end(), 0.0);
+  std::fill(field_PVV.begin(), field_PVV.end(), 0.0);
 
   const double ntot = static_cast<double>(N) * N * N;
   const double scale = 1.0 / (ntot * ntot);
@@ -1010,54 +1109,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
     }
 
     // --- Build A_a(x) = contract_rho(n(x), rho(x))[a] with local n(x) ---
-#ifdef SFGPU_KOKKOS
-    if (is_kokkos_vec(*solution)) {
-      Avec_component_local_kokkos(da, *solution, a, da1, qglob);
-    } else
-#endif
-    {
-      PetscInt xs, ys, zs, xm, ym, zm;
-      DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm);
-      PetscScalar ****u;
-      DMDAVecGetArrayDOFRead(da, *solution, &u);
-      PetscScalar ***q;
-      DMDAVecGetArray(da1, qglob, &q);
-      for (PetscInt k = zs; k < zs + zm; k++) {
-        for (PetscInt j = ys; j < ys + ym; j++) {
-          for (PetscInt i = xs; i < xs + xm; i++) {
-            // Local unit vector n = phi/|phi|
-            double n[ModelAData::Nphi];
-            double phi2 = 0.0;
-            for (int l = 0; l < ModelAData::Nphi; l++) {
-              n[l] = u[k][j][i][l];
-              phi2 += n[l] * n[l];
-            }
-            if (phi2 > 100.0 * std::numeric_limits<double>::min()) {
-              const double inv = 1.0 / sqrt(phi2);
-              for (int l = 0; l < ModelAData::Nphi; l++) n[l] *= inv;
-            } else {
-              n[0] = 1.0; n[1] = 0.0; n[2] = 0.0; n[3] = 0.0;
-            }
-            const double r0 = u[k][j][i][ModelAData::OffsetA + 0];
-            const double r1 = u[k][j][i][ModelAData::OffsetA + 1];
-            const double r2 = u[k][j][i][ModelAData::OffsetA + 2];
-            const double r3 = u[k][j][i][ModelAData::OffsetA + 3];
-            const double r4 = u[k][j][i][ModelAData::OffsetA + 4];
-            const double r5 = u[k][j][i][ModelAData::OffsetA + 5];
-            double result;
-            switch (a) {
-            case 0: result = -(n[1]*r0) - n[2]*r1 - n[3]*r2;  break;
-            case 1: result = n[0]*r0 + n[3]*r4 - n[2]*r5;     break;
-            case 2: result = n[0]*r1 - n[3]*r3 + n[1]*r5;     break;
-            default: result = n[0]*r2 + n[2]*r3 - n[1]*r4;    break;
-            }
-            q[k][j][i] = result;
-          }
-        }
-      }
-      DMDAVecRestoreArray(da1, qglob, &q);
-      DMDAVecRestoreArrayDOFRead(da, *solution, &u);
-    }
+    rotated_charge_component(da, *solution, a, false, da1, qglob);
 
     // --- Gather A_a to rank 0, FFT, and bin ---
     qfull = qglob;
@@ -1076,19 +1128,19 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       if (PetscMemTypeDevice(mtype)) {
         Kokkos::fence();
         const cufftDoubleComplex *ft_A = fftw3d->execute_device(qdata);
-        // Upload precomputed bin map and weight to device (once, on first a)
-        // TODO: keep these persistent if profiling shows the upload matters
-        Kokkos::View<int *> bm_d("bin_map", nmodes);
-        Kokkos::View<double *> wt_d("weight", nmodes);
-        {
-          auto bm_h = Kokkos::create_mirror_view(bm_d);
-          auto wt_h = Kokkos::create_mirror_view(wt_d);
-          for (size_t idx = 0; idx < nmodes; idx++) {
-            bm_h(idx) = field_bin_map[idx];
-            wt_h(idx) = field_weight[idx];
+        // Precomputed bin map and weight on the device, uploaded once
+        if (!d_field_bin_map) {
+          if (cudaMalloc(&d_field_bin_map, nmodes * sizeof(int)) !=
+                  cudaSuccess ||
+              cudaMalloc(&d_field_weight, nmodes * sizeof(double)) !=
+                  cudaSuccess) {
+            throw std::runtime_error(
+                "computeFieldSpectra: cudaMalloc of the bin map failed");
           }
-          Kokkos::deep_copy(bm_d, bm_h);
-          Kokkos::deep_copy(wt_d, wt_h);
+          cudaMemcpy(d_field_bin_map, field_bin_map.data(),
+                     nmodes * sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d_field_weight, field_weight.data(),
+                     nmodes * sizeof(double), cudaMemcpyHostToDevice);
         }
 
         Kokkos::View<double *> Ppipi_d("Ppipi", nb);
@@ -1109,7 +1161,8 @@ void Measurer::computeFieldSpectra(Vec *solution) {
         }
 
         field_binning_kokkos(d_field_ft_buf, ft_A, nmodes, scale,
-                             bm_d, wt_d, Ppipi_d, PAA_d, ReC_d);
+                             d_field_bin_map, d_field_weight, Ppipi_d, PAA_d,
+                             ReC_d);
 
         auto Ppipi_h2 =
             Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Ppipi_d);
@@ -1134,6 +1187,38 @@ void Measurer::computeFieldSpectra(Vec *solution) {
       }
       VecRestoreArrayReadAndMemType(qfull, &qdata);
     }
+
+    // --- With vector_spectra: V_a(x) with the same local n(x), |V_a(k)|^2 ---
+    if (model->data.ahandler.vector_spectra) {
+      rotated_charge_component(da, *solution, a, true, da1, qglob);
+      qfull = gatherQToZero();
+      if (rank == 0) {
+        const PetscScalar *qdata;
+        PetscMemType mtype;
+        VecGetArrayReadAndMemType(qfull, &qdata, &mtype);
+#ifdef SFGPU_CUFFT
+        if (PetscMemTypeDevice(mtype)) {
+          Kokkos::fence();
+          const cufftDoubleComplex *ft_V = fftw3d->execute_device(qdata);
+          Kokkos::View<double *> PVV_d("PVV", nb);
+          auto PVV_h = Kokkos::create_mirror_view(PVV_d);
+          for (int b = 0; b < nb; b++) PVV_h(b) = field_PVV[b];
+          Kokkos::deep_copy(PVV_d, PVV_h);
+          field_binning_single_kokkos(ft_V, nmodes, scale, d_field_bin_map,
+                                      d_field_weight, PVV_d);
+          Kokkos::deep_copy(PVV_h, PVV_d);
+          for (int b = 0; b < nb; b++) field_PVV[b] = PVV_h(b);
+        } else
+#endif
+        {
+          (void)mtype;
+          const std::complex<double> *ft_V = fftw3d->execute_host(qdata);
+          field_binning_single_host(ft_V, nmodes, scale, field_bin_map.data(),
+                                    field_weight.data(), field_PVV.data());
+        }
+        VecRestoreArrayReadAndMemType(qfull, &qdata);
+      }
+    }
   } // end loop over a
 
   // 4. Normalize: divide by the (time-independent) full k-space mode count
@@ -1146,6 +1231,7 @@ void Measurer::computeFieldSpectra(Vec *solution) {
         field_Pphi[b] /= Nb;
         field_PAA[b] /= Nb;
         field_ReC[b] /= Nb;
+        field_PVV[b] /= Nb;
       }
     }
   }

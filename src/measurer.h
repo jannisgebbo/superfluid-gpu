@@ -261,6 +261,8 @@ public:
   std::vector<double> field_Pphi;     // mean |phi(k)|^2 per bin, summed over a
   std::vector<double> field_PAA;      // mean |A(k)|^2 per bin, summed over a
   std::vector<double> field_ReC;      // mean Re[phi_a(k) A_a(k)*] per bin
+  std::vector<double> field_PVV;      // mean |V_a(k)|^2 per bin (only with
+                                      // vector_spectra)
 
   // Precomputed per-mode bin index, weight, and |k| for the half-spectrum
   // (size N*N*(N/2+1), built once in the constructor).
@@ -386,6 +388,7 @@ public:
       field_Pphi.assign(NFieldBins, 0.0);
       field_PAA.assign(NFieldBins, 0.0);
       field_ReC.assign(NFieldBins, 0.0);
+      field_PVV.assign(NFieldBins, 0.0);
 
       // Precompute the bin index and weight for every mode in the half-spectrum.
       // This avoids a binary search per mode inside the binning loop.
@@ -440,6 +443,8 @@ public:
     finalizeAnalyticalCoarsening();
 #ifdef SFGPU_CUFFT
     if (d_field_ft_buf) cudaFree(d_field_ft_buf);
+    if (d_field_bin_map) cudaFree(d_field_bin_map);
+    if (d_field_weight) cudaFree(d_field_weight);
 #endif
     VecScatterDestroy(&toZero);
     VecDestroy(&qseq);
@@ -472,8 +477,9 @@ public:
     computeTopChargeFourier(solution);
   }
 
-  // Computes radially binned 3D power spectra of the transverse fields
-  // pi_a and A_a. Collective, like measure_topcharge.
+  // Computes radially binned 3D power spectra of phi_a and the locally
+  // rotated A_a (and V_a with vector_spectra). Collective, like
+  // measure_topcharge.
   void measure_field_spectra(Vec *solution) { computeFieldSpectra(solution); }
 
   // Exact coarsening for simple dissipation (preserve_norm = false). The
@@ -512,7 +518,13 @@ private:
   std::vector<std::complex<double>> field_ft_buf;
 #ifdef SFGPU_CUFFT
   cufftDoubleComplex *d_field_ft_buf = nullptr;
+  // field_bin_map and field_weight on the device, uploaded once
+  int *d_field_bin_map = nullptr;
+  double *d_field_weight = nullptr;
 #endif
+  // Gather qglob to rank 0 in natural ordering; returns the vector holding
+  // all of q on rank 0 (qglob itself with one rank). Collective.
+  Vec gatherQToZero();
 
   // 3D spectra of a scalar field q(x). q lives in qglob, a global vector of
   // the 1-dof DMDA da1 with the same layout as the model's domain.
